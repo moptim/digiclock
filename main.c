@@ -65,7 +65,7 @@ static uint16_t btn0_presses = 0;
 static uint16_t btn1_presses = 0;
 
 static uint8_t  brightness_mask = 0;
-static int16_t  brightness_disparity = 0;
+static uint16_t brightness_disparity = 0;
 
 // Hours high digit, hours low digit, minutes high digit, minutes low digit,
 // seconds in binary
@@ -202,14 +202,12 @@ static void new_brightness_mask(void)
 	// squeeze this in as few instructions as possible, that's why we're
 	// handling sign bits by hand to determine overflows, who knows how
 	// much the compiler actually knows what I want it to do
-	       uint16_t disparity_u   = (uint16_t)brightness_disparity;
-	       uint16_t brightness_u  = (uint16_t)brightness;
-	static uint8_t  correction_lo = disparity_u >> 8;
-	static uint8_t  correction_hi = correction_lo & 0x80 ? 0xff : 0;
+	static uint8_t  correction_lo = brightness_disparity >> 8;
+	static uint8_t  correction_hi = (correction_lo & 0x80) ? 0xff : 0;
 	static uint16_t correction    = ((uint16_t)correction_hi) << 8 |
 	                                 (uint16_t)correction_lo;
 
-	static uint16_t corrected     = brightness_u - correction;
+	static uint16_t corrected     = (uint16_t)brightness - correction;
 	static uint8_t  corrected_hi  = (uint8_t)(corrected >> 8);
 	static uint8_t  corrected_lo  = (uint8_t)(corrected);
 	if (corrected_hi & 0x80)
