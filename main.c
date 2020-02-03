@@ -30,6 +30,11 @@
 
 #define ADC_INTERVAL		((IRQ_FREQ) / (ADC_FREQ))
 
+// TODO: check which bit actually was the colon, this is to avoid ever
+// blinking it. Also use it to shut down the pMOSFETs driving the high
+// side, they're active low.
+#define COLON_PFET_MASK		0xf8
+
 // Stolen from the Linux kernel sources. These will probably not work for
 // time scales more than half a second! Assumes 16-bit timestamps.
 #define TIME_AFTER(a,b)		(!!(((b) - (a)) & 0x8000))
@@ -66,21 +71,24 @@ static int16_t  brightness_disparity = 0;
 // seconds in binary
 static uint8_t  time[5] = {0, 0, 0, 0, 0};
 
-static uint8_t *const hrs_hi  = time[0];
-static uint8_t *const hrs_lo  = time[1];
-static uint8_t *const mins_hi = time[2];
-static uint8_t *const mins_lo = time[3];
-static uint8_t *const secs    = time[4];
+static uint8_t *const hrs_hi  = time + 0;
+static uint8_t *const hrs_lo  = time + 1;
+static uint8_t *const mins_hi = time + 2;
+static uint8_t *const mins_lo = time + 3;
+static uint8_t *const secs    = time + 4;
 
 struct rnd_state rnd = {0, 0, 0, 0};
 
 static void advance_hour(void)
 {
-	if (++(*hrs_lo) >= 10) {
+	(*hrs_lo)++;
+	if (*hrs_lo >= 10) {
 		*hrs_lo = 0;
-		if (++(*hrs_hi) >= 6) {
-			*hrs_hi = 0;
-		}
+		(*hrs_hi)++;
+	}
+	if (*hrs_lo >= 4 && *hrs_hi >= 2) {
+		*hrs_lo = 0;
+		*hrs_hi = 0;
 	}
 }
 
@@ -153,6 +161,7 @@ static void read_digital_io(void)
 {
 	static uint8_t pins;
 	static uint8_t zero_crossing;
+	static uint8_t btn0, btn1;
 
 	pins = PINE;
 	if ((ticks & ZC_PRESCALER_MASK) == 0) {
@@ -166,7 +175,6 @@ static void read_digital_io(void)
 		                                &zero_crossings);
 	}
 	if ((ticks & BTN_PRESCALER_MASK) == BTN_PRESCALER_MASK) {
-		uint8_t btn0, btn1;
 		btn0 = PIN_TO_U8(pins, 0);
 		btn1 = PIN_TO_U8(pins, 1);
 
@@ -185,28 +193,25 @@ static void read_digital_io(void)
 	}
 }
 
-static inline int rndchoice_with_disparity(uint8_t threshold,
-                                           uint8_t correction)
-
 // Do things this way to achieve high-pass characteristic on the dither
 // signal, ie. to force transitions reasonably often by keeping running
 // disparity bounded, to eliminate any low-frequency fluctuation.
-static uint8_t new_brightness_mask(void)
+static void new_brightness_mask(void)
 {
 	// Wish there were saturating arithmetic opcodes, lol... Trying to
 	// squeeze this in as few instructions as possible, that's why we're
 	// handling sign bits by hand to determine overflows, who knows how
 	// much the compiler actually knows what I want it to do
-	static uint16_t disparity_u  = (uint16_t)brightness_disparity;
-	static uint8_t correction_lo = disparity_u >> 8;
-	static uint8_t correction_hi = correction_lo & 0x80 ? 0xff : 0;
-	static uint16_t correction   = ((uint16_t)correction_hi) << 8 |
-	                                (uint16_t)correction_lo;
+	       uint16_t disparity_u   = (uint16_t)brightness_disparity;
+	       uint16_t brightness_u  = (uint16_t)brightness;
+	static uint8_t  correction_lo = disparity_u >> 8;
+	static uint8_t  correction_hi = correction_lo & 0x80 ? 0xff : 0;
+	static uint16_t correction    = ((uint16_t)correction_hi) << 8 |
+	                                 (uint16_t)correction_lo;
 
-	static uint16_t corrected    = (uint16_t)brightness - correction;
-
-	static uint8_t  corrected_hi = (uint8_t)(corrected >> 8);
-	static uint8_t  corrected_lo = (uint8_t)(corrected);
+	static uint16_t corrected     = brightness_u - correction;
+	static uint8_t  corrected_hi  = (uint8_t)(corrected >> 8);
+	static uint8_t  corrected_lo  = (uint8_t)(corrected);
 	if (corrected_hi & 0x80)
 		corrected_lo = 0;
 	else if (corrected_hi & 0x7f)
@@ -229,35 +234,41 @@ static uint8_t new_brightness_mask(void)
 
 static void update_display(void)
 {
-	static uint8_t num_id, num, brightness_mask, num_lo, num_hi;
+	static uint8_t num_id, num, pfet_select;
+	static uint8_t num_lo = 0, num_hi = COLON_PFET_MASK;
+
+	// TODO: check how the port mappings actually went etc
+	PORTB = num_lo;
+	PORTD = num_hi;
 
 	num_id = ticks & 0x3;
 	num = time[num_id];
-	brightness_mask = (brightness > rnd.c) ? 0xff : 0;
-	if (blinked_num == (num_id >> 1))
-		brightness_mask &= blink_mask;
 
-	// TODO: update difference-from-intended-average counters for high
-	// pass filtering
+	// TODO: check how the pFETs are indexed
+	pfet_select = 0x10 << num_id;
 
 	num_lo  = pgm_read_byte(num_los + num);
 	num_hi  = pgm_read_byte(num_his + num);
 	num_lo &= brightness_mask;
 	num_hi &= brightness_mask;
-	// TODO: handle the colon between numbers, it should not depend on
-	// blink mask
-	// TODO: check how the port mappings actually went etc
+
+	if (blinked_num == (num_id >> 1)) {
+		num_lo &= blink_mask;
+		num_hi &= blink_mask;
+	}
+	num_hi |= COLON_PFET_MASK;
+	num_hi ^= pfet_select;
 }
 
 ISR(TIMER0_OVF_vect)
 {
 	TCNT0 = TMR_RELOAD;
+	ticks++;
+
 	update_display();
 	read_digital_io();
 	if ((ticks & 3) == 1)
 		new_brightness_mask();
-
-	ticks++;
 }
 
 static void init_timer_irq(void)
@@ -288,18 +299,22 @@ static void init_adc(void)
 
 static inline int read_adc_adjust_brightness(void)
 {
-	static uint8_t curr_brightness;
+	static uint8_t raw_brightness, new_brightness;
 
 	// Still converting?
 	if (ADCSRA & 0x40)
 		return 0;
 	
-	curr_brightness = 255 - ADCL;
+	raw_brightness = 255 - ADCL;
 	// TODO: use some function here for brightness values
 
-	brightness = exponential_filter(brightness,
-	                                curr_brightness,
-	                                BRIGHTNESS_ALPHA);
+	new_brightness = exponential_filter(brightness,
+	                                    curr_brightness,
+	                                    BRIGHTNESS_ALPHA);
+	if (new_brightness != brightness) {
+		brightness = new_brightness;
+		brightness_disparity = 0;
+	}
 	// Start reading the next value
 	ADCSRA |= 0x40;
 	return 1;
