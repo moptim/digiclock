@@ -11,6 +11,9 @@
 // 120 for North Americans
 #define ZC_FREQ			100
 
+#define BLINK_TOGGLE_FREQ	4
+#define BLINK_ZC_COUNT		((ZC_FREQ) / (BLINK_TOGGLE_FREQ))
+
 // For 4 kHz
 #define BTN_PRESCALER_MASK	0xf
 // 32 kHz
@@ -38,16 +41,30 @@ struct rnd_state {
 	uint8_t a, b, c, x;
 };
 
-static uint8_t  zc_confidence, btn0_confidence, btn1_confidence;
-static uint8_t  zc_state, btn0_state, btn1_state;
-static uint16_t ticks;
-static uint16_t zero_crossings;
-static uint16_t btn0_presses;
-static uint16_t btn1_presses;
+static const uint8_t *const num_los PROGMEM = {
+	// TODO
+};
+
+static const uint8_t *const num_his PROGMEM = {
+	// TODO
+};
+
+static uint8_t  blink_mask = 0;
+static uint8_t  blinked_num = 0; // 0: hours, 1: mins, 2: no blink
+static uint8_t  brightness = 0;
+static uint8_t  zc_confidence = 0, btn0_confidence = 0, btn1_confidence = 0;
+static uint8_t  zc_state = 0, btn0_state = 0, btn1_state = 0;
+static uint16_t ticks = 0;
+static uint16_t zero_crossings = 0;
+static uint16_t btn0_presses = 0;
+static uint16_t btn1_presses = 0;
+
+static uint8_t  brightness_mask = 0;
+static int16_t  brightness_disparity = 0;
 
 // Hours high digit, hours low digit, minutes high digit, minutes low digit,
 // seconds in binary
-static uint8_t  time[5];
+static uint8_t  time[5] = {0, 0, 0, 0, 0};
 
 static uint8_t *const hrs_hi  = time[0];
 static uint8_t *const hrs_lo  = time[1];
@@ -55,7 +72,7 @@ static uint8_t *const mins_hi = time[2];
 static uint8_t *const mins_lo = time[3];
 static uint8_t *const secs    = time[4];
 
-struct rnd_state rnd;
+struct rnd_state rnd = {0, 0, 0, 0};
 
 static void advance_hour(void)
 {
@@ -88,10 +105,6 @@ static void advance_second(void)
 
 static inline void rerandom(void)
 {
-	rndnum ^= rndnum << 13;
-	rndnum ^= rndnum >> 17;
-	rndnum ^= rndnum << 5;
-
 	rnd.x++;
 	rnd.a = (rnd.a ^ rnd.c ^ rnd.x);
 	rnd.b = (rnd.b + rnd.a);
@@ -100,6 +113,8 @@ static inline void rerandom(void)
 
 static uint8_t exponential_filter(uint8_t old, uint8_t new, uint8_t alpha)
 {
+	// No statics since this can be called from mainloop as well as from
+	// the ISR
 	uint8_t  inv_alpha, alpha_p1;
 	uint16_t old_multd, new_multd;
 	uint16_t sum;
@@ -136,8 +151,8 @@ static uint8_t update_digital_state(uint8_t   confidence,
 
 static void read_digital_io(void)
 {
-	uint8_t pins;
-	uint8_t zero_crossing;
+	static uint8_t pins;
+	static uint8_t zero_crossing;
 
 	pins = PINE;
 	if ((ticks & ZC_PRESCALER_MASK) == 0) {
@@ -150,7 +165,7 @@ static void read_digital_io(void)
 		                                zc_state,
 		                                &zero_crossings);
 	}
-	if ((ticks & BTN_PRESCALER_MASK) == 0) {
+	if ((ticks & BTN_PRESCALER_MASK) == BTN_PRESCALER_MASK) {
 		uint8_t btn0, btn1;
 		btn0 = PIN_TO_U8(pins, 0);
 		btn1 = PIN_TO_U8(pins, 1);
@@ -170,30 +185,79 @@ static void read_digital_io(void)
 	}
 }
 
+static inline int rndchoice_with_disparity(uint8_t threshold,
+                                           uint8_t correction)
+
+// Do things this way to achieve high-pass characteristic on the dither
+// signal, ie. to force transitions reasonably often by keeping running
+// disparity bounded, to eliminate any low-frequency fluctuation.
+static uint8_t new_brightness_mask(void)
+{
+	// Wish there were saturating arithmetic opcodes, lol... Trying to
+	// squeeze this in as few instructions as possible, that's why we're
+	// handling sign bits by hand to determine overflows, who knows how
+	// much the compiler actually knows what I want it to do
+	static uint16_t disparity_u  = (uint16_t)brightness_disparity;
+	static uint8_t correction_lo = disparity_u >> 8;
+	static uint8_t correction_hi = correction_lo & 0x80 ? 0xff : 0;
+	static uint16_t correction   = ((uint16_t)correction_hi) << 8 |
+	                                (uint16_t)correction_lo;
+
+	static uint16_t corrected    = (uint16_t)brightness - correction;
+
+	static uint8_t  corrected_hi = (uint8_t)(corrected >> 8);
+	static uint8_t  corrected_lo = (uint8_t)(corrected);
+	if (corrected_hi & 0x80)
+		corrected_lo = 0;
+	else if (corrected_hi & 0x7f)
+		corrected_lo = 255;
+
+	rerandom();
+	if (corrected_lo > rnd.c)
+		brightness_mask = 0xff;
+	else
+		brightness_mask = 0;
+
+	// A hacky way to update disparity, but it works, lol
+	// disparity_update = (choice) ? (0xff - threshold) : (0 - threshold)
+	// disparity += disparity_update
+	// But the first part (0xff / 0) in the update var is the same as new
+	// brightness mask, so use it there.
+	brightness_disparity += brightness_mask;
+	brightness_disparity -= brightness;
+}
+
 static void update_display(void)
 {
-	uint8_t which_num = ticks & 0x3;
-	uint8_t brightness_mask = (brightness > rndnum) ? 0xff : 0;
-	brightness 
+	static uint8_t num_id, num, brightness_mask, num_lo, num_hi;
+
+	num_id = ticks & 0x3;
+	num = time[num_id];
+	brightness_mask = (brightness > rnd.c) ? 0xff : 0;
+	if (blinked_num == (num_id >> 1))
+		brightness_mask &= blink_mask;
+
+	// TODO: update difference-from-intended-average counters for high
+	// pass filtering
+
+	num_lo  = pgm_read_byte(num_los + num);
+	num_hi  = pgm_read_byte(num_his + num);
+	num_lo &= brightness_mask;
+	num_hi &= brightness_mask;
+	// TODO: handle the colon between numbers, it should not depend on
+	// blink mask
+	// TODO: check how the port mappings actually went etc
+}
 
 ISR(TIMER0_OVF_vect)
 {
 	TCNT0 = TMR_RELOAD;
 	update_display();
 	read_digital_io();
-	ticks++;
-	if (ticks & 3 == 0)
-		rerandom();
-}
+	if ((ticks & 3) == 1)
+		new_brightness_mask();
 
-static void init_vars(void)
-{
-	rnd = { 1, 1, 1, 1 };
-	ticks = 0;
-	zc_state       = btn0_state      = btn1_state      = 0;
-	zc_confidence  = btn0_confidence = btn1_confidence = 0;
-	zero_crossings = btn0_presses    = btn1_presses    = 0;
-	time[0] = time[1] = time[2] = time[3] = time[4] = 0;
+	ticks++;
 }
 
 static void init_timer_irq(void)
@@ -205,6 +269,12 @@ static void init_timer_irq(void)
 
 static void init_io(void)
 {
+	DDRB  = 0xff;
+	DDRD  = 0xff;
+	DDRC  = 0;
+	DDRE  = 0;
+	PORTC = 0;
+	PORTE = 0;
 }
 
 static void init_adc(void)
@@ -216,44 +286,80 @@ static void init_adc(void)
 	ADCSRA = 0xc7;
 }
 
-static inline int read_adc(void)
+static inline int read_adc_adjust_brightness(void)
 {
-	uint8_t brightness;
+	static uint8_t curr_brightness;
 
 	// Still converting?
 	if (ADCSRA & 0x40)
 		return 0;
 	
-	brightness = 255 - ADCL;
-	// TODO: update filters
+	curr_brightness = 255 - ADCL;
+	// TODO: use some function here for brightness values
 
+	brightness = exponential_filter(brightness,
+	                                curr_brightness,
+	                                BRIGHTNESS_ALPHA);
 	// Start reading the next value
 	ADCSRA |= 0x40;
 	return 1;
 }
 
+static inline void toggle_blink(void)
+{
+	blink_mask = ~blink_mask;
+}
+
+static inline void advance_blink(void)
+{
+	if (blinked_num++ >= 2)
+		blinked_num = 0;
+}
+
+static inline void advance_blinked_num(void)
+{
+	if (blinked_num == 0) {
+		advance_hour();
+	} else if (blinked_num == 1) {
+		seconds = 0;
+		advance_minute();
+	}
+}
+
 int main(void)
 {
-	uint16_t next_adc_read  = ADC_INTERVAL;
-	uint16_t next_second_zc = ZC_FREQ;
+	static uint16_t next_adc_read  = ADC_INTERVAL;
+	static uint16_t next_second_zc = ZC_FREQ;
+
+	static uint16_t btn0_presses_recognized = 0;
+	static uint16_t btn1_presses_recognized = 0;
 
 	cli();
 	init_adc();
-	init_vars();
 	init_timer_irq();
 	init_io();
 	sei();
 
 	for (;;) {
-		if (TIME_AFTER(ticks, next_adc_read)) {
-			// NOTE: Here you have to filter the reading etc
-			if (read_adc())
+		if (TIME_AFTER(ticks, next_adc_read))
+			if (read_adc_adjust_brightness())
 				next_adc_read += ADC_INTERVAL;
+
+		if (TIME_AFTER(zero_crossings, next_blink_zc)) {
+			toggle_blink();
+			next_blink_zc += BLINK_ZC_COUNT;
 		}
 		if (TIME_AFTER(zero_crossings, next_second_zc)) {
 			advance_second();
 			next_second_zc += ZC_FREQ;
 		}
-		// TODO: handle buttons too
+		if (TIME_AFTER(btn0_presses, btn0_presses_recognized)) {
+			advance_blink();
+			btn0_presses_recognized++;
+		}
+		if (TIME_AFTER(btn1_presses, btn1_presses_recognized)) {
+			advance_blinked_num();
+			btn1_presses_recognized++;
+		}
 	}
 }
