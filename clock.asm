@@ -8,12 +8,14 @@
 .def	ksp4			= r6
 .def	ksp5			= r7
 
+; Keep status register here during ISR
+.def	sreg_cache		= r8
+
 ; User-writable registers
-.def	ur0			= r8
-.def	ur1			= r9
-.def	ur2			= r10
-.def	ur3			= r11
-.def	ur4			= r12
+.def	ur0			= r9
+.def	ur1			= r10
+.def	ur2			= r11
+.def	ur3			= r12
 .def	brightness		= r13
 .def	blink_mask		= r14
 .def	blinked_num		= r15
@@ -30,6 +32,7 @@
 .def	ticks_lo		= r24
 .def	ticks_hi		= r25
 
+
 .DSEG
 rnd_state:		.byte 4		; u8 * 4
 zc_confidence:		.byte 1
@@ -42,6 +45,8 @@ zero_crossings:		.byte 2		; u16
 btn0_presses:		.byte 2		; u16
 btn1_presses:		.byte 2		; u16
 time:			.byte 5		; u8 * 5
+
+.equ	KRNLPAGE	= high(SRAM_START)
 
 .equ	rnd_a		= rnd_state + 0
 .equ	rnd_b		= rnd_state + 1
@@ -62,8 +67,10 @@ cli
 jmp	start
 
 .org TIMER0_OVFaddr
+in	sreg_cache,		SREG
 ldi	tmp_lo,			TMR_RELOAD
 out	TCNT0,			tmp_lo
+ldi	XH,			KRNLPAGE	; TODO: maybe move to init?
 
 adiw	ticks_hi:ticks_lo,	1
 
@@ -79,7 +86,6 @@ out	PORTD,			num_hi
 mov	tmp_lo,			ticks_lo
 andi	tmp_lo,			0x03
 ldi	XL,			low (time)
-ldi	XH,			high(time)	; TODO: do we need this? do all irq vars fit in first 256B?
 add	XL,			tmp_lo
 ld	tmp_lo,			X
 ; TODO: tmp_lo has the number to show now, do something with it
@@ -88,15 +94,14 @@ ld	tmp_lo,			X
 
 
 read_digital_io:
-in	tmp_lo,			PINE
-mov	tmp_hi,			ticks_lo
-andi	tmp_hi,			ZC_PRESCALER_MASK
+mov	tmp_lo,			ticks_lo
+andi	tmp_lo,			ZC_PRESCALER_MASK
 brne	no_zc_check
 
 zc_check:
-	; Generate 0 or 0xff mask depending on ZC bit
+	; Translate ZC bit: 0 -> 0, 1 -> 255
 	clr	tmp_lo
-	sbrc	tmp_hi,		2
+	sbic	PINE,		2
 	ser	tmp_lo
 
 	lds	ksp0,		zc_confidence
@@ -109,16 +114,17 @@ zc_check:
 	sts	zc_state,	ksp0
 	rjmp	isr_return0
 
+; Assumes that BTN_PRESCALER_MASK > 3 and (BTN_PRESCALER_MASK & 3) == 3
 no_zc_check:
-mov	tmp_hi,		ticks_lo
-andi	tmp_hi,		BTN_PRESCALER_MASK
-cpi	tmp_hi,		BTN0_TICK
+mov	tmp_lo,		ticks_lo
+andi	tmp_lo,		BTN_PRESCALER_MASK
+cpi	tmp_lo,		BTN0_TICK
 breq	btn0_check
-cpi	tmp_hi,		BTN1_TICK
+cpi	tmp_lo,		BTN1_TICK
 breq	btn1_check
 
-andi	tmp_hi,		3
-cpi	tmp_hi,		1
+andi	tmp_lo,		3
+cpi	tmp_lo,		1
 breq	new_brightness_mask
 
 isr_return0:
@@ -126,6 +132,7 @@ isr_return0:
 	pop	zl
 	pop	r1
 	pop	r0
+	out	SREG,		sreg_cache
 	reti
 
 ; NOTE: this is here just to fit well among other code, as no code flow can
@@ -156,6 +163,8 @@ exponential_filter_isr:
 ; Returns: ksp0: next state
 
 ; Thrashes:XL, ksp2, ksp3
+
+; Side effects: Increments *(u8 *)X upon L->H edge
 update_digital_state_isr:
 	cpi	ksp1,		DIGITAL_LO2HI_THRES
 	brge	.signal_hi
@@ -186,35 +195,36 @@ update_digital_state_isr:
 		ret
 
 btn0_check:
-	; Generate 0 or 0xff mask depending on ZC bit
+	; Translate BTN0 bit: 0 -> 0, 1 -> 255
 	clr	tmp_lo
-	sbrc	tmp_hi,		2
+	sbic	PINE,		0
 	ser	tmp_lo
 
-	lds	ksp0,		zc_confidence
+	lds	ksp0,		btn0_confidence
 	rcall	exponential_filter_isr
-	sts	zc_confidence,	ksp1
+	sts	btn0_confidence,	ksp1
 
-	lds	zc_state,	ksp0
-	ldi	XL,		low(zero_crossings)
+	lds	btn0_state,	ksp0
+	ldi	XL,		low(btn0_presses)
 	rcall	update_digital_state_isr
-	sts	zc_state,	ksp0
+	sts	btn0_state,	ksp0
 	rjmp	isr_return0
 
-isr_return1:
-	pop	zh
-	pop	zl
-	pop	r1
-	pop	r0
-	reti
-
 btn1_check:
-	asdf_asdf
-isr_return2:
-	pop	zh
-	pop	zl
-	pop	r1
-	pop	r0
+	; Translate BTN1 bit: 0 -> 0, 1 -> 255
+	clr	tmp_lo
+	sbic	PINE,		1
+	ser	tmp_lo
+
+	lds	ksp0,		btn1_confidence
+	rcall	exponential_filter_isr
+	sts	btn1_confidence,	ksp1
+
+	lds	btn1_state,	ksp0
+	ldi	XL,		low(btn1_presses)
+	rcall	update_digital_state_isr
+	sts	btn1_state,	ksp0
+	rjmp	isr_return0
 
 new_brightness_mask:
 	; Use tmp_lo:brightness_disparity_hi as 16-bit correction, note though
@@ -264,8 +274,8 @@ new_brightness_mask:
 	cp	ksp2,		tmp_3
 	brcc	.nozero_britemask
 		ser brightness_mask
-	.nozero_britemask:
 
+	.nozero_britemask:
 	clr	ksp2
 	add	brightness_disparity_lo,	brightness_mask
 	adc	brightness_disparity_hi,	ksp2
@@ -273,20 +283,14 @@ new_brightness_mask:
 	sub	brightness_disparity_lo,	brightness
 	sbc	brightness_disparity_lo,	ksp2
 
-isr_return3:
+	rjmp	isr_return0	; TODO: may fail if there's too many instructions in between
+isr_return1:
 	pop	zh
 	pop	zl
 	pop	r1
 	pop	r0
-
-
-
-
-pop	zh
-pop	zl
-pop	r1
-pop	r0
-reti
+	out	SREG,		sreg_cache
+	reti
 
 start:
 ldi SPL, low (RAMEND)
