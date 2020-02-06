@@ -19,6 +19,10 @@
 // 32 kHz
 #define ZC_PRESCALER_MASK	0x1
 
+// Which ticks (mod 16) buttons 0 and 1 are polled
+#define BTN0_TICK		0x7
+#define BTN1_TICK		0xf
+
 // Note that these use different sampling frequencies
 #define ZC_ALPHA		32
 #define BTN_ALPHA		16
@@ -174,19 +178,22 @@ static void read_digital_io(void)
 		                                zc_state,
 		                                &zero_crossings);
 	}
-	if ((ticks & BTN_PRESCALER_MASK) == BTN_PRESCALER_MASK) {
+	if ((ticks & BTN_PRESCALER_MASK) == BTN0_TICK) {
 		btn0 = PIN_TO_U8(pins, 0);
-		btn1 = PIN_TO_U8(pins, 1);
-
 		btn0_confidence = exponential_filter(btn0_confidence,
 		                                     btn0,
 		                                     BTN_ALPHA);
-		btn1_confidence = exponential_filter(btn1_confidence,
-		                                     btn1,
-		                                     BTN_ALPHA);
+
 		btn0_state = update_digital_state(btn0_confidence,
 		                                  btn0_state,
 		                                  &btn0_presses);
+	}
+	if ((ticks & BTN_PRESCALER_MASK) == BTN1_TICK) {
+		btn1 = PIN_TO_U8(pins, 1);
+		btn1_confidence = exponential_filter(btn1_confidence,
+		                                     btn1,
+		                                     BTN_ALPHA);
+
 		btn1_state = update_digital_state(btn1_confidence,
 		                                  btn1_state,
 		                                  &btn1_presses);
@@ -258,17 +265,6 @@ static void update_display(void)
 	num_hi ^= pfet_select;
 }
 
-ISR(TIMER0_OVF_vect)
-{
-	TCNT0 = TMR_RELOAD;
-	ticks++;
-
-	update_display();
-	read_digital_io();
-	if ((ticks & 3) == 1)
-		new_brightness_mask();
-}
-
 static void init_timer_irq(void)
 {
 	TCCR0 = 0x01;	// Prescaler 1
@@ -284,6 +280,9 @@ static void init_io(void)
 	DDRE  = 0;
 	PORTC = 0;
 	PORTE = 0;
+
+	PORTB = 0;
+	PORTD = 0;
 }
 
 static void init_adc(void)
@@ -337,6 +336,17 @@ static inline void advance_blinked_num(void)
 		seconds = 0;
 		advance_minute();
 	}
+}
+
+ISR(TIMER0_OVF_vect)
+{
+	TCNT0 = TMR_RELOAD;
+	ticks++;
+
+	update_display();
+	read_digital_io();
+	if ((ticks & 3) == 1)
+		new_brightness_mask();
 }
 
 int main(void)
