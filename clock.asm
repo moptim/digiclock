@@ -1,17 +1,41 @@
 .include "m328PBdef.inc"
 
+; TODO TODO: Align number data on a large enough boundary, so that they can
+; never straddle a page boundary (they're 20 bytes, so at least 32B aligned)
+
+.equ	FREQ			= 8000000
+.equ	TMR_FREQ		= ((FREQ) / 1)
+.equ	IRQ_MAXFREQ		= 64000
+.equ	ADC_FREQ		= 100
+.equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
+
+; Has to be 2^n - 1 because it's a bitmask. A random number at most this large
+; is added to TMR_RELOAD at the start of each IRQ, to spread out the IRQ
+; frequency spikes in output signals.
+.equ	TMR_RELOAD_RANGE	= 15
+
+; TODO: were pfets in PD0...3? Was colon in PD4?
+.equ	PFETS_FORCE_OFF		= 0x0f
+.equ	COLON_MASK		= 0x10
+
+.equ	PFET0_MASK		= (~0x01)
+.equ	PFET1_MASK		= (~0x02)
+.equ	PFET2_MASK		= (~0x04)
+.equ	PFET3_MASK		= (~0x08)
+
 ; Kernel scratchpad
 .def	ksp0			= r2
 .def	ksp1			= r3
 .def	ksp2			= r4
 .def	ksp3			= r5
 .def	ksp4			= r6
-.def	ksp5			= r7
+
+.def	rnd_c			= r7
 
 ; Keep status register here during ISR
 .def	sreg_cache		= r8
 
-; User-writable registers
+; User-writable registers. Also r0, r1 and Z are ok to use
 .def	ur0			= r9
 .def	ur1			= r10
 .def	ur2			= r11
@@ -34,7 +58,9 @@
 
 
 .DSEG
-rnd_state:		.byte 4		; u8 * 4
+time:			.byte 5		; u8 * 5; has to be in first 63B
+pfet_masks:		.byte 4		; u8 * 4; ditto, TODO: initialize (0xfe, 0xfd, 0xfb, 0xf7 or something)
+rnd_state:		.byte 3		; u8 * 3 - store rnd.c in register
 zc_confidence:		.byte 1
 btn0_confidence:	.byte 1
 btn1_confidence:	.byte 1
@@ -44,14 +70,12 @@ btn1_state:		.byte 1
 zero_crossings:		.byte 2		; u16
 btn0_presses:		.byte 2		; u16
 btn1_presses:		.byte 2		; u16
-time:			.byte 5		; u8 * 5
 
 .equ	KRNLPAGE	= high(SRAM_START)
 
 .equ	rnd_a		= rnd_state + 0
 .equ	rnd_b		= rnd_state + 1
-.equ	rnd_c		= rnd_state + 2
-.equ	rnd_x		= rnd_state + 3
+.equ	rnd_x		= rnd_state + 2
 
 .equ	hrs_hi		= time + 0
 .equ	hrs_lo		= time + 1
@@ -68,9 +92,18 @@ jmp	start
 
 .org TIMER0_OVFaddr
 in	sreg_cache,		SREG
+
+# TODO: either this...
 ldi	tmp_lo,			TMR_RELOAD
+
+; TODO: or this, it's only two cycles more and eats away TMR_FREQ spectral
+; peaks
+# mov	tmp_lo,			rnd_c
+# andi	tmp_lo,			TMR_RELOAD_RANGE
+# subi	tmp_lo,			-TMR_RELOAD	; Lol, why no ADDI pseudo-op?
+
 out	TCNT0,			tmp_lo
-ldi	XH,			KRNLPAGE	; TODO: maybe move to init?
+ldi	YH,			KRNLPAGE	; TODO: maybe move to init?
 
 adiw	ticks_hi:ticks_lo,	1
 
@@ -83,15 +116,30 @@ update_display:
 out	PORTB,			num_lo
 out	PORTD,			num_hi
 
-mov	tmp_lo,			ticks_lo
-andi	tmp_lo,			0x03
-ldi	XL,			low (time)
-add	XL,			tmp_lo
-ld	tmp_lo,			X
-; TODO: tmp_lo has the number to show now, do something with it
+mov	YL,			ticks_lo
+andi	YL,			0x03
+ldd	ZL,			Y + low(time)
+ldd	ksp0,			Y + low(pfet_masks)
 
+lsl	ZL
+addi	ZL,			low (nums)
+ldi	ZH,			high(nums)
+lpm	num_lo,			Z+
+lpm	num_hi,			Z
 
+lsr	YL
+cp	YL,			blinked_num
+brne	.noblink
+	and	num_lo,			blink_mask
+	and	num_hi,			blink_mask
+	ori	num_hi,			COLON_MASK
 
+.noblink:
+and	num_lo,			brightness_mask
+and	num_hi,			brightness_mask
+
+ori	num_hi,			PFETS_FORCE_OFF	; All pfets off (high)...
+and	num_hi,			ksp0		; save for next one
 
 read_digital_io:
 mov	tmp_lo,			ticks_lo
@@ -109,7 +157,7 @@ zc_check:
 	sts	zc_confidence,	ksp1
 
 	lds	zc_state,	ksp0
-	ldi	XL,		low(zero_crossings)
+	ldi	YL,		low(zero_crossings)
 	rcall	update_digital_state_isr
 	sts	zc_state,	ksp0
 	rjmp	isr_return0
@@ -158,32 +206,33 @@ exponential_filter_isr:
 
 ; Params:  ksp1: current confidence
 ;          ksp0: current state
-;          X:    ptr to rising edge counter
+;          Y:    ptr to rising edge counter
 
 ; Returns: ksp0: next state
 
-; Thrashes:XL, ksp2, ksp3
+; Thrashes:YL, ksp2, ksp3, tmp_lo
 
-; Side effects: Increments *(u8 *)X upon L->H edge
+; Side effects: Increments *(u8 *)Y upon L->H edge
 update_digital_state_isr:
-	cpi	ksp1,		DIGITAL_LO2HI_THRES
+	mov	tmp_lo,		ksp1
+	cpi	tmp_lo,		DIGITAL_LO2HI_THRES
 	brge	.signal_hi
-	cpi	ksp1,		DIGITAL_HI2LO_THRES
+	cpi	tmp_lo,		DIGITAL_HI2LO_THRES
 	brlo	.signal_lo
 	ret
 	.signal_hi:
 		tst	ksp0
 		brne	.was_already_hi
 			inc	ksp0
-			ld	ksp2,	X+
-			ld	ksp3,	X
-			dec	XL
+			ld	ksp2,	Y+
+			ld	ksp3,	Y
+			dec	YL
 			inc	ksp2
 			brne	.noinchi
 				inc	ksp3
 			.noinchi:
-			st	X+,	ksp2
-			st	X,	ksp3
+			st	Y+,	ksp2
+			st	Y,	ksp3
 
 		.was_already_hi:
 		ret
@@ -205,7 +254,7 @@ btn0_check:
 	sts	btn0_confidence,	ksp1
 
 	lds	btn0_state,	ksp0
-	ldi	XL,		low(btn0_presses)
+	ldi	YL,		low(btn0_presses)
 	rcall	update_digital_state_isr
 	sts	btn0_state,	ksp0
 	rjmp	isr_return0
@@ -221,7 +270,7 @@ btn1_check:
 	sts	btn1_confidence,	ksp1
 
 	lds	btn1_state,	ksp0
-	ldi	XL,		low(btn1_presses)
+	ldi	YL,		low(btn1_presses)
 	rcall	update_digital_state_isr
 	sts	btn1_state,	ksp0
 	rjmp	isr_return0
@@ -251,27 +300,25 @@ new_brightness_mask:
 	.rerandom:
 	lds	ksp0,		rnd_a
 	lds	ksp1,		rnd_b
-	lds	ksp2,		rnd_c
-	lds	ksp3,		rnd_x
+	lds	ksp2,		rnd_x
 
-	inc	ksp3			; rnd.x++
-	eor	ksp0,		ksp2
-	eor	ksp0,		ksp3	; rnd.a ^= rnd.c ^ rnd.x
+	inc	ksp2			; rnd.x++
+	eor	ksp0,		rnd_c
+	eor	ksp0,		ksp2	; rnd.a ^= rnd.c ^ rnd.x
 
 	add	ksp1,		ksp0	; rnd.b += rnd.a
 
 	mov	ksp4,		ksp1
 	lsr	ksp4
-	add	ksp2,		ksp4
-	eor	ksp2,		ksp0	; rnd.c = rnd.c + (rnd.b >> 1) ^ rnd.a
+	add	rnd_c,		ksp4
+	eor	rnd_c,		ksp0	; rnd.c = rnd.c + (rnd.b >> 1) ^ rnd.a
 
 	sts	rnd_a,		ksp0
 	sts	rnd_b,		ksp1
-	sts	rnd_c,		ksp2
-	sts	rnd_x,		ksp3
+	sts	rnd_x,		ksp2
 
 	clr	brightness_mask
-	cp	ksp2,		tmp_3
+	cp	rnd_c,		tmp_3
 	brcc	.nozero_britemask
 		ser brightness_mask
 
@@ -295,3 +342,13 @@ isr_return1:
 start:
 ldi SPL, low (RAMEND)
 ldi SPH, high(RAMEND)
+
+.do_pfet_masks:
+ldi	tmplo,		PFET0_MASK
+sts	pfet_masks + 0,	tmplo
+ldi	tmplo,		PFET1_MASK
+sts	pfet_masks + 1,	tmplo
+ldi	tmplo,		PFET2_MASK
+sts	pfet_masks + 2,	tmplo
+ldi	tmplo,		PFET3_MASK
+sts	pfet_masks + 3,	tmplo
