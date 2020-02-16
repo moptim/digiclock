@@ -5,7 +5,7 @@
 
 ; Take care that the longest ISR code path time will never exceed TMR_RELOAD..
 ; otherwise nothing spectacular will probably happen
-.equ	IRQ_MAXFREQ		= 60700
+.equ	IRQ_MAXFREQ		= 75000
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
 .equ	ZC_FREQ			= 100
@@ -18,7 +18,7 @@
 ; Has to be 2^n - 1 because it's a bitmask. A random number at most this large
 ; is added to TMR_RELOAD at the start of each IRQ, to spread out the IRQ
 ; frequency spikes in output signals.
-.equ	TMR_RELOAD_RANGE	= 31
+.equ	TMR_RELOAD_RANGE	= 63
 
 .equ	BLINK_TOGGLE_FREQ	= 4
 .equ	BLINK_ZC_COUNT		= ((ZC_FREQ) / (BLINK_TOGGLE_FREQ))
@@ -118,9 +118,28 @@ mov	ZL,		z_cache_lo
 pop	r1
 pop	r0
 out	SREG,		sreg_cache
+clr	XH	; TODO TODO TODO TODO
 reti
 .endmacro
 
+; Params:  ksp0:   old
+;          tmp_lo: new
+;          ksp2:   alpha
+
+; Returns: ksp1:   next confidence value
+
+; Thrashes:tmp_hi, ksp2, r0, r1
+.macro	exponential_filter_isr	; 11 cycles
+	ser	tmp_hi
+	sub	tmp_hi,		ksp2	; inv_alpha
+	inc	ksp2			; alpha_p1
+
+	mul	ksp0,		tmp_hi
+	movw	ksp1:ksp0,	r1:r0
+	mul	tmp_lo,		ksp2
+	add	ksp0,		r0
+	adc	ksp1,		r1
+.endmacro
 
 .DSEG
 ; The assembler seems to think it can abuse extended IO registers as more
@@ -173,18 +192,24 @@ rjmp	start
 .org TIMER0_OVFaddr
 in	sreg_cache,		SREG
 
-; Using a random number in [-32, -1], not [0, 31], to eat away spectral
+; TODO: speed check
+tst	XH
+breq	not_late
+cli
+sleep
+
+not_late:
+sei
+ser	XH
+; /TODO
+
+; Using a random number in [-64, -1], not [0, 63], to eat away spectral
 ; peaks
 mov	tmp_lo,			rnd_c
 ori	tmp_lo,			~TMR_RELOAD_RANGE
 subi	tmp_lo,			-TMR_RELOAD
 
 out	TCNT0,			tmp_lo
-
-; TODO! Testing.
-lds	tmp_lo,			zero_crossings
-out	PORTB,			tmp_lo
-out	PORTD,			tmp_lo
 
 push	r0
 push	r1
@@ -225,7 +250,7 @@ and	num_hi,			brightness_mask
 ori	num_hi,			PFETS_FORCE_OFF	; All pfets off (high)...
 and	num_hi,			ksp0		; save for next one
 
-; TODO: 36 cycles + latency
+; TODO: 41 cycles + latency
 read_digital_io:
 mov	tmp_lo,			ticks
 andi	tmp_lo,			ZC_PRESCALER_MASK
@@ -234,13 +259,12 @@ brne	digiio_no_zc_check
 digiio_zc_check:
 	; Translate ZC bit: 0 -> 0, 1 -> 255
 	clr	tmp_lo
-	;sbic	PINE,		2
-	sbrc	ticks,		7 ; TODO TODO
+	sbic	PINE,		2
 	ser	tmp_lo
 
 	lds	ksp0,		zc_confidence
 	ldi	ksp2,		ZC_ALPHA
-	rcall	exponential_filter_isr
+	exponential_filter_isr
 	sts	zc_confidence,	ksp1
 
 	lds	ksp0,		zc_state
@@ -270,7 +294,7 @@ btn0_check:
 
 	lds	ksp0,			btn0_confidence
 	ldi	ksp2,			BTN_ALPHA
-	rcall	exponential_filter_isr
+	exponential_filter_isr
 	sts	btn0_confidence,	ksp1
 
 	lds	ksp0,			btn0_state
@@ -285,9 +309,9 @@ btn1_check:
 	ser	tmp_lo
 
 	lds	ksp0,			btn1_confidence
-	; TODO 52
+	; TODO 57
 	ldi	ksp2,			BTN_ALPHA
-	rcall	exponential_filter_isr
+	exponential_filter_isr
 	sts	btn1_confidence,	ksp1
 
 	lds	ksp0,			btn1_state
@@ -353,26 +377,6 @@ new_brightness_mask:
 	; 90 cycles up to here?
 	return_from_isr
 
-; Params:  ksp0:   old
-;          tmp_lo: new
-;          ksp2:   alpha
-
-; Returns: ksp1:   next confidence value
-
-; Thrashes:tmp_hi, ksp2, r0, r1
-exponential_filter_isr:
-	ser	tmp_hi
-	sub	tmp_hi,		ksp2	; inv_alpha
-	inc	ksp2			; alpha_p1
-
-	mul	ksp0,		tmp_hi
-	movw	ksp1:ksp0,	r1:r0
-	mul	tmp_lo,		ksp2
-	add	ksp0,		r0
-	adc	ksp1,		r1
-	; TODO 67 thru btn1
-	ret
-
 ; Params:  ksp1: current confidence
 ;          ksp0: current state
 ;          Y:    ptr to rising edge counter
@@ -384,7 +388,7 @@ exponential_filter_isr:
 
 ; Side effects: Increments *(u8 *)Y upon L->H edge
 update_digital_state_isr_iret:
-	; TODO 79 thru btn1
+	; TODO 77 thru btn1
 	cpi	ksp1,		DIGITAL_LO2HI_THRES
 	brsh	uds_signal_hi
 	cpi	ksp1,		DIGITAL_HI2LO_THRES
