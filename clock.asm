@@ -2,7 +2,7 @@
 
 .equ	FREQ			= 8000000
 .equ	TMR_FREQ		= ((FREQ) / 1)
-.equ	IRQ_MAXFREQ		= 50000
+.equ	IRQ_MAXFREQ		= 56000
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
 .equ	ZC_FREQ			= 100
@@ -188,24 +188,15 @@ andi	YL,			0x03
 ldd	ZL,			Y + low(time)
 ldd	ksp0,			Y + low(pfet_masks)
 
-;out	PORTB,			YH	; Num id
-;out	PORTB,			YL	; Num id
-;out	PORTB,			ZL	; Time[YL]
-;out	PORTB,			ksp0	; Pfets[YL]
-; out	PORTB,			num_lo
-; out	PORTD,			num_hi
-
 lsl	ZL
 ldi	ZH,			high(nums << 1)
 subi	ZL,			(-low(nums << 1)) & 0xff
 sbci	ZH,			0xff
 
-lpm	num_lo,			Z+
-lpm	num_hi,			Z
-
-; TODO TOD TODO DEEBUG
 out	PORTB,			num_lo
 out	PORTD,			num_hi
+lpm	num_lo,			Z+
+lpm	num_hi,			Z
 
 lsr	YL
 cp	YL,			blinked_num
@@ -414,6 +405,11 @@ update_digital_state_isr:
 		uds_was_already_lo:
 		ret
 
+cli
+sleeploop:
+sleep
+rjmp sleeploop
+
 
 start:
 ldi	tmp_lo,	low (RAMEND)
@@ -436,13 +432,13 @@ zeroloop:
 
 ; TODO TODO TODO TEST TEST
 ldi	tmp_lo,		1
-sts	hrs_lo,		tmp_lo
-ldi	tmp_lo,		3
 sts	hrs_hi,		tmp_lo
+ldi	tmp_lo,		3
+sts	hrs_lo,		tmp_lo
 ldi	tmp_lo,		5
-sts	mns_lo,		tmp_lo
-ldi	tmp_lo,		7
 sts	mns_hi,		tmp_lo
+ldi	tmp_lo,		7
+sts	mns_lo,		tmp_lo
 
 ldi	num_hi,		PFETS_FORCE_OFF
 
