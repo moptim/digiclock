@@ -47,23 +47,16 @@
 .equ	PFET2_MASK		= (~0x04)
 .equ	PFET3_MASK		= (~0x08)
 
-; Kernel scratchpad
-.def	ksp0			= r2
-.def	ksp1			= r3
-.def	ksp2			= r4
-.def	ksp3			= r5
-.def	ksp4			= r6
+.def	z_cache_lo		= r2
+.def	z_cache_hi		= r3
+.def	brightness_mask		= r4
+.def	brightness_disparity_lo = r5
+.def	brightness_disparity_hi = r6
 
 .def	rnd_c			= r7
 
 ; Keep status register here during ISR...
 .def	sreg_cache		= r8
-
-; And Z here. Do NOT use X for anything!
-.undef	XL
-.undef	XH
-.def	z_cache_lo		= r26	; TODO: could be moved to r0-r15
-.def	z_cache_hi		= r27	; TODO: could be moved to r0-r15
 
 ; User-writable registers. Also r0, r1 and Z are ok to use
 .def	ur0			= r9
@@ -79,11 +72,16 @@
 .def	tmp_hi			= r17
 .def	num_lo			= r18
 .def	num_hi			= r19
-.def	brightness_mask		= r20
-.def	brightness_disparity_lo = r21	; TODO: could be moved to r0-r15
-.def	brightness_disparity_hi = r22	; TODO: could be moved to r0-r15
-.def	tmp_3			= r23
-.def	ticks			= r24	; TODO: could be moved to r0-r15
+
+; Kernel scratchpad
+.def	ksp0			= r20
+.def	ksp1			= r21
+.def	ksp2			= r22
+.def	ksp3			= r23
+.def	ksp4			= r24
+
+.def	tmp_3			= r25
+.def	ticks			= r26	; TODO: could be moved to r0-r15
 
 
 ; Params: ur0:ur1 timer to compare against target timestamp
@@ -337,7 +335,7 @@ new_brightness_mask:
 	clr	brightness_mask
 	cp	rnd_c,		tmp_3
 	brcc	nbm_nozero_britemask
-		ser brightness_mask
+		dec brightness_mask
 
 	nbm_nozero_britemask:
 	clr	ksp2
@@ -379,18 +377,9 @@ exponential_filter_isr:
 
 ; Side effects: Increments *(u8 *)Y upon L->H edge
 update_digital_state_isr:
-	mov	tmp_lo,		ksp1
-
-	;ldi	tmp_lo,		0xd8
-	;out	PORTD,		tmp_lo
-	;out	PORTB,		tmp_lo ; TODO
-	;out	PORTD,		tmp_lo ; TODO
-	;out	PORTB,		ksp0
-	;out	PORTD,		ksp0
-
-	cpi	tmp_lo,		DIGITAL_LO2HI_THRES
+	cpi	ksp1,		DIGITAL_LO2HI_THRES
 	brsh	uds_signal_hi
-	cpi	tmp_lo,		DIGITAL_HI2LO_THRES
+	cpi	ksp1,		DIGITAL_HI2LO_THRES
 	brlo	uds_signal_lo
 	ret
 	uds_signal_hi:
@@ -411,11 +400,6 @@ update_digital_state_isr:
 	uds_signal_lo:
 		clr	ksp0
 		ret
-
-cli
-sleeploop:
-sleep
-rjmp sleeploop
 
 
 start:
@@ -509,18 +493,16 @@ sts	next_adc_read,	tmp_lo
 ldi	tmp_lo,		ZC_FREQ
 sts	next_second_zc,	tmp_lo
 
+ldi	tmp_lo,		2
+mov	blinked_num,	tmp_lo
+
 ; TODO TODO TODO
 ldi	tmp_lo,		230
 mov	brightness,	tmp_lo
 
-ldi	tmp_lo,		2
-mov	blinked_num,	tmp_lo
-
 
 sei
 mainloop:
-	; TODO
-	rjmp mainloop
 	; NOTE: Always load high first and low then, to get magnitude right
 	; if there is a race condition (wonder if these could be 8 bits tho)
 	;
