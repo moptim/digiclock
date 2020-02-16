@@ -50,8 +50,6 @@
 .equ	PFET2_MASK		= (~0x04)
 .equ	PFET3_MASK		= (~0x08)
 
-.def	z_cache_lo		= r2
-.def	z_cache_hi		= r3
 .def	brightness_mask		= r4
 .def	brightness_disparity_lo = r5
 .def	brightness_disparity_hi = r6
@@ -61,8 +59,14 @@
 ; Keep status register here during ISR...
 .def	sreg_cache		= r8
 
+; And Z here
+.def	z_cache_lo		= r2
+.def	z_cache_hi		= r3
+
+.def	ticks			= r9
+
 ; User-writable registers. Also r0, r1 and Z are ok to use
-.def	ur0			= r9
+.def	ur0			= r25
 .def	ur1			= r10
 .def	ur2			= r11
 .def	ur3			= r12
@@ -83,8 +87,6 @@
 .def	ksp3			= r23
 .def	ksp4			= r24
 
-.def	tmp_3			= r25
-.def	ticks			= r26	; TODO: could be moved to r0-r15
 
 
 ; Params: ur0:ur1 timer to compare against target timestamp
@@ -171,17 +173,18 @@ rjmp	start
 .org TIMER0_OVFaddr
 in	sreg_cache,		SREG
 
-; TODO: either this...
-;ldi	tmp_lo,			TMR_RELOAD
-
-; TODO: or this, it's only two cycles more and eats away TMR_FREQ spectral
+; Using a random number in [-32, -1], not [0, 31], to eat away spectral
 ; peaks
-; Using a random number in [-16, -1] and not [0, 15]
 mov	tmp_lo,			rnd_c
 ori	tmp_lo,			~TMR_RELOAD_RANGE
 subi	tmp_lo,			-TMR_RELOAD
 
 out	TCNT0,			tmp_lo
+
+; TODO! Testing.
+lds	tmp_lo,			zero_crossings
+out	PORTB,			tmp_lo
+out	PORTD,			tmp_lo
 
 push	r0
 push	r1
@@ -231,18 +234,19 @@ brne	digiio_no_zc_check
 digiio_zc_check:
 	; Translate ZC bit: 0 -> 0, 1 -> 255
 	clr	tmp_lo
-	sbic	PINE,		2
+	;sbic	PINE,		2
+	sbrc	ticks,		7 ; TODO TODO
 	ser	tmp_lo
 
 	lds	ksp0,		zc_confidence
-	ldi	tmp_3,		ZC_ALPHA
+	ldi	ksp2,		ZC_ALPHA
 	rcall	exponential_filter_isr
 	sts	zc_confidence,	ksp1
 
 	lds	ksp0,		zc_state
 	ldi	YL,		low(zero_crossings)
-	rcall	update_digital_state_isr
-	sts	zc_state,	ksp0
+	ldi	XL,		low(zc_state)
+	rjmp	update_digital_state_isr_iret
 
 ; Assumes that BTN_PRESCALER_MASK > 3 and (BTN_PRESCALER_MASK & 3) == 3
 digiio_no_zc_check:
@@ -265,15 +269,14 @@ btn0_check:
 	ser	tmp_lo
 
 	lds	ksp0,			btn0_confidence
-	ldi	tmp_3,			BTN_ALPHA
+	ldi	ksp2,			BTN_ALPHA
 	rcall	exponential_filter_isr
 	sts	btn0_confidence,	ksp1
 
 	lds	ksp0,			btn0_state
 	ldi	YL,			low(btn0_presses)
-	rcall	update_digital_state_isr
-	sts	btn0_state,		ksp0
-	return_from_isr
+	ldi	XL,			low(btn0_state)
+	rjmp	update_digital_state_isr_iret
 
 btn1_check:
 	; Translate BTN1 bit: 0 -> 0, 1 -> 255
@@ -283,16 +286,14 @@ btn1_check:
 
 	lds	ksp0,			btn1_confidence
 	; TODO 52
-	ldi	tmp_3,			BTN_ALPHA
+	ldi	ksp2,			BTN_ALPHA
 	rcall	exponential_filter_isr
 	sts	btn1_confidence,	ksp1
 
 	lds	ksp0,			btn1_state
 	ldi	YL,			low(btn1_presses)
-	rcall	update_digital_state_isr
-	; TODO 100
-	sts	btn1_state,		ksp0
-	return_from_isr	; Thru btn1: 114 cycles + latency (estimate as 10 cycles)
+	ldi	XL,			low(btn1_state)
+	rjmp	update_digital_state_isr_iret
 
 new_brightness_mask:
 	; Use tmp_lo:brightness_disparity_hi as 16-bit correction, note though
@@ -301,20 +302,20 @@ new_brightness_mask:
 	sbrc	brightness_disparity_hi,	7
 	ser	tmp_lo
 
-	; And tmp_hi:tmp_3 as 16-bit brightness, tmp_3 will be corrected
+	; And tmp_hi:ksp3 as 16-bit brightness, ksp3 will be corrected
 	; brightness threshold
 	clr	tmp_hi
-	mov	tmp_3,		brightness
+	mov	ksp3,		brightness
 
-	sub	tmp_3,		brightness_disparity_hi
+	sub	ksp3,		brightness_disparity_hi
 	sbc	tmp_hi,		tmp_lo
 
 	; If bit 7 is set in tmp_hi, we went negative - use 0 as corrected
 	; threshold. If bit 0 instead is set there, we use 255.
 	sbrc	tmp_hi,		7
-	clr	tmp_3
+	clr	ksp3
 	sbrc	tmp_hi,		0
-	ser	tmp_3
+	ser	ksp3
 
 	nbm_rerandom:
 	lds	ksp0,		rnd_a
@@ -337,7 +338,7 @@ new_brightness_mask:
 	sts	rnd_x,		ksp2
 
 	clr	brightness_mask
-	cp	rnd_c,		tmp_3
+	cp	rnd_c,		ksp3
 	brcc	nbm_nozero_britemask
 		dec brightness_mask
 
@@ -354,19 +355,19 @@ new_brightness_mask:
 
 ; Params:  ksp0:   old
 ;          tmp_lo: new
-;          tmp_3:  alpha
+;          ksp2:   alpha
 
 ; Returns: ksp1:   next confidence value
 
-; Thrashes:tmp_hi, tmp_3, r0, r1
+; Thrashes:tmp_hi, ksp2, r0, r1
 exponential_filter_isr:
 	ser	tmp_hi
-	sub	tmp_hi,		tmp_3	; inv_alpha
-	inc	tmp_3			; alpha_p1
+	sub	tmp_hi,		ksp2	; inv_alpha
+	inc	ksp2			; alpha_p1
 
 	mul	ksp0,		tmp_hi
 	movw	ksp1:ksp0,	r1:r0
-	mul	tmp_lo,		tmp_3
+	mul	tmp_lo,		ksp2
 	add	ksp0,		r0
 	adc	ksp1,		r1
 	; TODO 67 thru btn1
@@ -375,22 +376,23 @@ exponential_filter_isr:
 ; Params:  ksp1: current confidence
 ;          ksp0: current state
 ;          Y:    ptr to rising edge counter
+;          XL:   low(ptr) to where next state should be stored
 
 ; Returns: ksp0: next state
 
-; Thrashes:ksp2, ksp3, tmp_lo
+; Thrashes:ksp2, ksp3, tmp_lo, YL
 
 ; Side effects: Increments *(u8 *)Y upon L->H edge
-update_digital_state_isr:
+update_digital_state_isr_iret:
 	; TODO 79 thru btn1
 	cpi	ksp1,		DIGITAL_LO2HI_THRES
 	brsh	uds_signal_hi
 	cpi	ksp1,		DIGITAL_HI2LO_THRES
 	brlo	uds_signal_lo
-	ret
+	rjmp	uds_out
 	uds_signal_hi:
 		tst	ksp0
-		brne	uds_was_already_hi
+		brne	uds_out			; Was already high
 			dec	ksp0
 			ldd	ksp2,	Y + 0
 			ldd	ksp3,	Y + 1
@@ -401,11 +403,14 @@ update_digital_state_isr:
 			std	Y + 0,	ksp2
 			std	Y + 1,	ksp3
 
-		uds_was_already_hi:
-		ret
+		uds_out:
+		mov	YL,		XL
+		st	Y,		ksp0
+		return_from_isr
+
 	uds_signal_lo:
 		clr	ksp0
-		ret
+		rjmp	uds_out
 
 
 start:
@@ -572,14 +577,6 @@ time_after:
 	sbc	ur2,		ur0
 	pop	ur2
 	ret
-
-; Params:  ksp0:   old
-;          tmp_lo: new
-;          tmp_3:  alpha
-
-; Returns: ksp1:   next confidence value
-
-; Thrashes:tmp_hi, tmp_3, r0, r1, ksp1
 
 ; Params:  ur0:    old
 ;          ur1:    new
