@@ -2,7 +2,10 @@
 
 .equ	FREQ			= 8000000
 .equ	TMR_FREQ		= ((FREQ) / 1)
-.equ	IRQ_MAXFREQ		= 56000
+
+; Take care that the longest ISR code path time will never exceed TMR_RELOAD..
+; otherwise nothing spectacular will probably happen
+.equ	IRQ_MAXFREQ		= 60700
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
 .equ	ZC_FREQ			= 100
@@ -15,7 +18,7 @@
 ; Has to be 2^n - 1 because it's a bitmask. A random number at most this large
 ; is added to TMR_RELOAD at the start of each IRQ, to spread out the IRQ
 ; frequency spikes in output signals.
-.equ	TMR_RELOAD_RANGE	= 15
+.equ	TMR_RELOAD_RANGE	= 31
 
 .equ	BLINK_TOGGLE_FREQ	= 4
 .equ	BLINK_ZC_COUNT		= ((ZC_FREQ) / (BLINK_TOGGLE_FREQ))
@@ -107,6 +110,15 @@ brpl	@1
 	sts	@0 + 0,		ur2
 .endmacro
 
+.macro	return_from_isr		; 11 cycles
+mov	ZH,		z_cache_hi
+mov	ZL,		z_cache_lo
+pop	r1
+pop	r0
+out	SREG,		sreg_cache
+reti
+.endmacro
+
 
 .DSEG
 ; The assembler seems to think it can abuse extended IO registers as more
@@ -160,14 +172,14 @@ rjmp	start
 in	sreg_cache,		SREG
 
 ; TODO: either this...
-ldi	tmp_lo,			TMR_RELOAD
+;ldi	tmp_lo,			TMR_RELOAD
 
 ; TODO: or this, it's only two cycles more and eats away TMR_FREQ spectral
 ; peaks
 ; Using a random number in [-16, -1] and not [0, 15]
-;mov	tmp_lo,			rnd_c
-;ori	tmp_lo,			~TMR_RELOAD_RANGE
-;subi	tmp_lo,			-TMR_RELOAD
+mov	tmp_lo,			rnd_c
+ori	tmp_lo,			~TMR_RELOAD_RANGE
+subi	tmp_lo,			-TMR_RELOAD
 
 out	TCNT0,			tmp_lo
 
@@ -210,7 +222,7 @@ and	num_hi,			brightness_mask
 ori	num_hi,			PFETS_FORCE_OFF	; All pfets off (high)...
 and	num_hi,			ksp0		; save for next one
 
-; TODO: 41 cycles + latency
+; TODO: 36 cycles + latency
 read_digital_io:
 mov	tmp_lo,			ticks
 andi	tmp_lo,			ZC_PRESCALER_MASK
@@ -231,7 +243,6 @@ digiio_zc_check:
 	ldi	YL,		low(zero_crossings)
 	rcall	update_digital_state_isr
 	sts	zc_state,	ksp0
-	rjmp	isr_return0
 
 ; Assumes that BTN_PRESCALER_MASK > 3 and (BTN_PRESCALER_MASK & 3) == 3
 digiio_no_zc_check:
@@ -245,14 +256,7 @@ breq	btn1_check
 andi	tmp_lo,		3
 cpi	tmp_lo,		1
 breq	new_brightness_mask
-
-isr_return0:
-	mov	ZH,		z_cache_hi
-	mov	ZL,		z_cache_lo
-	pop	r1
-	pop	r0
-	out	SREG,		sreg_cache
-	reti	; 128 cycles + IRQ entry latency (7 cycles? maybe 10) thru btn1
+return_from_isr
 
 btn0_check:
 	; Translate BTN0 bit: 0 -> 0, 1 -> 255
@@ -269,7 +273,7 @@ btn0_check:
 	ldi	YL,			low(btn0_presses)
 	rcall	update_digital_state_isr
 	sts	btn0_state,		ksp0
-	rjmp	isr_return0
+	return_from_isr
 
 btn1_check:
 	; Translate BTN1 bit: 0 -> 0, 1 -> 255
@@ -278,7 +282,7 @@ btn1_check:
 	ser	tmp_lo
 
 	lds	ksp0,			btn1_confidence
-	; TODO 58
+	; TODO 52
 	ldi	tmp_3,			BTN_ALPHA
 	rcall	exponential_filter_isr
 	sts	btn1_confidence,	ksp1
@@ -286,9 +290,9 @@ btn1_check:
 	lds	ksp0,			btn1_state
 	ldi	YL,			low(btn1_presses)
 	rcall	update_digital_state_isr
-	; TODO 107
+	; TODO 100
 	sts	btn1_state,		ksp0
-	rjmp	isr_return0
+	return_from_isr	; Thru btn1: 114 cycles + latency (estimate as 10 cycles)
 
 new_brightness_mask:
 	; Use tmp_lo:brightness_disparity_hi as 16-bit correction, note though
@@ -345,7 +349,8 @@ new_brightness_mask:
 	sub	brightness_disparity_lo,	brightness
 	sbc	brightness_disparity_lo,	ksp2
 
-	rjmp	isr_return0
+	; 90 cycles up to here?
+	return_from_isr
 
 ; Params:  ksp0:   old
 ;          tmp_lo: new
@@ -364,7 +369,7 @@ exponential_filter_isr:
 	mul	tmp_lo,		tmp_3
 	add	ksp0,		r0
 	adc	ksp1,		r1
-	; TODO 72 thru btn1
+	; TODO 67 thru btn1
 	ret
 
 ; Params:  ksp1: current confidence
@@ -377,6 +382,7 @@ exponential_filter_isr:
 
 ; Side effects: Increments *(u8 *)Y upon L->H edge
 update_digital_state_isr:
+	; TODO 79 thru btn1
 	cpi	ksp1,		DIGITAL_LO2HI_THRES
 	brsh	uds_signal_hi
 	cpi	ksp1,		DIGITAL_HI2LO_THRES
