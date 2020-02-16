@@ -2,7 +2,7 @@
 
 .equ	FREQ			= 8000000
 .equ	TMR_FREQ		= ((FREQ) / 1)
-.equ	IRQ_MAXFREQ		= 64000
+.equ	IRQ_MAXFREQ		= 56000
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
 .equ	ZC_FREQ			= 100
@@ -156,7 +156,7 @@ raw_brightness:		.byte 1
 
 .org 0x00
 cli
-jmp	start
+rjmp	start
 
 .org TIMER0_OVFaddr
 in	sreg_cache,		SREG
@@ -176,8 +176,6 @@ ldi	tmp_lo,			TMR_RELOAD
 
 out	TCNT0,			tmp_lo
 
-inc	ticks
-
 push	r0
 push	r1
 
@@ -186,6 +184,8 @@ out	PORTB,			num_lo
 out	PORTD,			num_hi
 
 mov	YL,			ticks
+inc	ticks
+
 andi	YL,			0x03
 ldd	ZL,			Y + low(time)
 ldd	ksp0,			Y + low(pfet_masks)
@@ -425,6 +425,16 @@ zeroloop:
 	cpi	ZL,	low (SRAM_START + SRAM_SIZE)
 	brlo	zeroloop
 
+; TODO TODO TODO TEST TEST
+ldi	tmp_lo,		1
+sts	hrs_lo,		tmp_lo
+ldi	tmp_lo,		3
+sts	hrs_hi,		tmp_lo
+ldi	tmp_lo,		5
+sts	mns_lo,		tmp_lo
+ldi	tmp_lo,		7
+sts	mns_hi,		tmp_lo
+
 ldi	num_hi,		PFETS_FORCE_OFF
 
 do_pfet_masks:
@@ -486,6 +496,13 @@ ldi	tmp_lo,		ADC_INTERVAL
 sts	next_adc_read,	tmp_lo
 ldi	tmp_lo,		ZC_FREQ
 sts	next_second_zc,	tmp_lo
+
+; TODO TODO TODO
+ldi	tmp_lo,		230
+mov	brightness,	tmp_lo
+
+ldi	tmp_lo,		2
+mov	blinked_num,	tmp_lo
 
 
 sei
@@ -743,8 +760,12 @@ advance_hour:
 	ret
 
 nums:
-.db 0xff, 0x03, 0x3c, 0x00, 0xdf, 0x05, 0x7f, 0x05, 0x39, 0x07	; 0...4
-.db 0x6f, 0x07, 0xef, 0x07, 0x3f, 0x04, 0xff, 0x07, 0x7f, 0x07	; 5...9
+; TODO: fix these to be according to the board plan
+; .db 0xff, 0x03, 0x3c, 0x00, 0xdf, 0x05, 0x7f, 0x05, 0x39, 0x07	; 0...4
+; .db 0x6f, 0x07, 0xef, 0x07, 0x3f, 0x04, 0xff, 0x07, 0x7f, 0x07	; 5...9
+
+.db 0xaa, 0x00, 0x11, 0x20, 0x22, 0x40, 0x33, 0x60, 0x44, 0x80
+.db 0x55, 0xa0, 0x66, 0xc0, 0x77, 0xe0, 0x88, 0x00, 0x99, 0x20
 
 ; TODO :D
 brightness_table:
