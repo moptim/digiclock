@@ -2,7 +2,7 @@
 
 .equ	FREQ			= 8000000
 .equ	TMR_FREQ		= ((FREQ) / 1)
-.equ	IRQ_MAXFREQ		= 56000
+.equ	IRQ_MAXFREQ		= 50000
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
 .equ	ZC_FREQ			= 100
@@ -161,9 +161,6 @@ rjmp	start
 .org TIMER0_OVFaddr
 in	sreg_cache,		SREG
 
-mov	z_cache_lo,		ZL
-mov	z_cache_hi,		ZH
-
 ; TODO: either this...
 ldi	tmp_lo,			TMR_RELOAD
 
@@ -179,16 +176,24 @@ out	TCNT0,			tmp_lo
 push	r0
 push	r1
 
-update_display:
-out	PORTB,			num_lo
-out	PORTD,			num_hi
+mov	z_cache_lo,		ZL
+mov	z_cache_hi,		ZH
 
+update_display:
 mov	YL,			ticks
 inc	ticks
 
+ldi	YH,			high(time)
 andi	YL,			0x03
 ldd	ZL,			Y + low(time)
 ldd	ksp0,			Y + low(pfet_masks)
+
+;out	PORTB,			YH	; Num id
+;out	PORTB,			YL	; Num id
+;out	PORTB,			ZL	; Time[YL]
+;out	PORTB,			ksp0	; Pfets[YL]
+; out	PORTB,			num_lo
+; out	PORTD,			num_hi
 
 lsl	ZL
 ldi	ZH,			high(nums << 1)
@@ -197,6 +202,10 @@ sbci	ZH,			0xff
 
 lpm	num_lo,			Z+
 lpm	num_hi,			Z
+
+; TODO TOD TODO DEEBUG
+out	PORTB,			num_lo
+out	PORTD,			num_hi
 
 lsr	YL
 cp	YL,			blinked_num
@@ -507,6 +516,8 @@ mov	blinked_num,	tmp_lo
 
 sei
 mainloop:
+	; TODO
+	rjmp mainloop
 	; NOTE: Always load high first and low then, to get magnitude right
 	; if there is a race condition (wonder if these could be 8 bits tho)
 	;
@@ -764,8 +775,8 @@ nums:
 ; .db 0xff, 0x03, 0x3c, 0x00, 0xdf, 0x05, 0x7f, 0x05, 0x39, 0x07	; 0...4
 ; .db 0x6f, 0x07, 0xef, 0x07, 0x3f, 0x04, 0xff, 0x07, 0x7f, 0x07	; 5...9
 
-.db 0xaa, 0x00, 0x11, 0x20, 0x22, 0x40, 0x33, 0x60, 0x44, 0x80
-.db 0x55, 0xa0, 0x66, 0xc0, 0x77, 0xe0, 0x88, 0x00, 0x99, 0x20
+.db 0xaa, 0xa0, 0x11, 0x10, 0x22, 0x20, 0x33, 0x30, 0x44, 0x40
+.db 0x55, 0x50, 0x66, 0x60, 0x77, 0x70, 0x88, 0x80, 0x99, 0x90
 
 ; TODO :D
 brightness_table:
