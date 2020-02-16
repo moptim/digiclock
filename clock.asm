@@ -62,8 +62,8 @@
 ; And Z here. Do NOT use X for anything!
 .undef	XL
 .undef	XH
-.def	z_cache_lo		= r26
-.def	z_cache_hi		= r27
+.def	z_cache_lo		= r26	; TODO: could be moved to r0-r15
+.def	z_cache_hi		= r27	; TODO: could be moved to r0-r15
 
 ; User-writable registers. Also r0, r1 and Z are ok to use
 .def	ur0			= r9
@@ -80,10 +80,10 @@
 .def	num_lo			= r18
 .def	num_hi			= r19
 .def	brightness_mask		= r20
-.def	brightness_disparity_lo = r21
-.def	brightness_disparity_hi = r22
+.def	brightness_disparity_lo = r21	; TODO: could be moved to r0-r15
+.def	brightness_disparity_hi = r22	; TODO: could be moved to r0-r15
 .def	tmp_3			= r23
-.def	ticks			= r24
+.def	ticks			= r24	; TODO: could be moved to r0-r15
 
 
 ; Params: ur0:ur1 timer to compare against target timestamp
@@ -225,6 +225,7 @@ digiio_zc_check:
 	ser	tmp_lo
 
 	lds	ksp0,		zc_confidence
+	ldi	tmp_3,		ZC_ALPHA
 	rcall	exponential_filter_isr
 	sts	zc_confidence,	ksp1
 
@@ -262,6 +263,7 @@ btn0_check:
 	ser	tmp_lo
 
 	lds	ksp0,			btn0_confidence
+	ldi	tmp_3,			BTN_ALPHA
 	rcall	exponential_filter_isr
 	sts	btn0_confidence,	ksp1
 
@@ -279,6 +281,7 @@ btn1_check:
 
 	lds	ksp0,			btn1_confidence
 	; TODO 58
+	ldi	tmp_3,			BTN_ALPHA
 	rcall	exponential_filter_isr
 	sts	btn1_confidence,	ksp1
 
@@ -352,7 +355,7 @@ new_brightness_mask:
 
 ; Returns: ksp1:   next confidence value
 
-; Thrashes:tmp_hi, tmp_3, r0, r1, ksp1
+; Thrashes:tmp_hi, tmp_3, r0, r1
 exponential_filter_isr:
 	ser	tmp_hi
 	sub	tmp_hi,		tmp_3	; inv_alpha
@@ -372,37 +375,41 @@ exponential_filter_isr:
 
 ; Returns: ksp0: next state
 
-; Thrashes:YL, ksp2, ksp3, tmp_lo
+; Thrashes:ksp2, ksp3, tmp_lo
 
 ; Side effects: Increments *(u8 *)Y upon L->H edge
 update_digital_state_isr:
 	mov	tmp_lo,		ksp1
+
+	;ldi	tmp_lo,		0xd8
+	;out	PORTD,		tmp_lo
+	;out	PORTB,		tmp_lo ; TODO
+	;out	PORTD,		tmp_lo ; TODO
+	;out	PORTB,		ksp0
+	;out	PORTD,		ksp0
+
 	cpi	tmp_lo,		DIGITAL_LO2HI_THRES
-	brge	uds_signal_hi
+	brsh	uds_signal_hi
 	cpi	tmp_lo,		DIGITAL_HI2LO_THRES
 	brlo	uds_signal_lo
 	ret
 	uds_signal_hi:
 		tst	ksp0
 		brne	uds_was_already_hi
-			inc	ksp0
-			ld	ksp2,	Y+
-			ld	ksp3,	Y
-			dec	YL
+			dec	ksp0
+			ldd	ksp2,	Y + 0
+			ldd	ksp3,	Y + 1
 			inc	ksp2
 			brne	uds_noinchi
 				inc	ksp3
 			uds_noinchi:
-			st	Y+,	ksp2
-			st	Y,	ksp3
+			std	Y + 0,	ksp2
+			std	Y + 1,	ksp3
 
 		uds_was_already_hi:
 		ret
 	uds_signal_lo:
-		tst	ksp0
-		breq	uds_was_already_lo
-			clr	ksp0
-		uds_was_already_lo:
+		clr	ksp0
 		ret
 
 cli
@@ -720,7 +727,7 @@ advance_minute:
 	lds	ZL,		mns_lo
 	inc	ZL
 	cpi	ZL,		10
-	brge	am_do_tens
+	brsh	am_do_tens
 		sts	mns_lo,		ZL
 		rjmp	am_out
 
@@ -730,7 +737,7 @@ advance_minute:
 		lds	ZL,		mns_hi
 		inc	ZL
 		cpi	ZL,	6
-		brge	am_do_hour
+		brsh	am_do_hour
 			sts	mns_hi,		ZL
 			rjmp	am_out
 		am_do_hour:
