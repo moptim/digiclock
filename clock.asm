@@ -113,13 +113,13 @@ brpl	@1
 .endmacro
 
 .macro	return_from_isr		; 11 cycles
-mov	ZH,		z_cache_hi
-mov	ZL,		z_cache_lo
-pop	r1
-pop	r0
-out	SREG,		sreg_cache
-clr	XH	; TODO TODO TODO TODO
-reti
+	mov	ZH,		z_cache_hi
+	mov	ZL,		z_cache_lo
+	pop	r1
+	pop	r0
+	out	SREG,		sreg_cache
+	clr	XH	; TODO TODO TODO TODO
+	reti
 .endmacro
 
 ; Params:  ksp0:   old
@@ -287,9 +287,9 @@ breq	new_brightness_mask
 return_from_isr
 
 btn0_check:
-	; Translate BTN0 bit: 0 -> 0, 1 -> 255
+	; Translate BTN0 bit: 1 -> 0, 0 -> 255
 	clr	tmp_lo
-	sbic	PINE,			0
+	sbis	PINE,			0
 	ser	tmp_lo
 
 	lds	ksp0,			btn0_confidence
@@ -303,9 +303,9 @@ btn0_check:
 	rjmp	update_digital_state_isr_iret
 
 btn1_check:
-	; Translate BTN1 bit: 0 -> 0, 1 -> 255
+	; Translate BTN1 bit: 1 -> 0, 0 -> 255
 	clr	tmp_lo
-	sbic	PINE,			1
+	sbis	PINE,			1
 	ser	tmp_lo
 
 	lds	ksp0,			btn1_confidence
