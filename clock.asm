@@ -218,8 +218,20 @@ mov	z_cache_lo,		ZL
 mov	z_cache_hi,		ZH
 
 update_display:
+
+; Turn PFETs off for a couple cycles to discourage ghosting. They're slow to
+; turn on<->off (like 2 cycles), the gate capacitance is like 600pF. The low
+; side NPNs should turn on/off practically instantly since the required base
+; current is miniscule, so it won't differentially affect brightness that
+; PORTB low sides are open one cycle earlier than PORTD low sides.
+ldi	tmp_lo,			PFETS_FORCE_OFF
+out	PORTD,			tmp_lo
+
 mov	YL,			ticks
 inc	ticks
+
+out	PORTB,			num_lo
+out	PORTD,			num_hi
 
 ldi	YH,			high(time)
 andi	YL,			0x03
@@ -231,8 +243,9 @@ ldi	ZH,			high(nums << 1)
 subi	ZL,			(-low(nums << 1)) & 0xff
 sbci	ZH,			0xff
 
-out	PORTB,			num_lo
-out	PORTD,			num_hi
+; NPNs should be very quick to turn on/off since the base current used is
+; miniscule, so it should be fine to TODO fill this sentence
+
 lpm	num_lo,			Z+
 lpm	num_hi,			Z
 
