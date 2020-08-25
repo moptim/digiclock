@@ -488,7 +488,13 @@ ldi	tmp_lo,		0xc7
 sts	ADCSRA,		tmp_lo
 
 init_io:
-; Ports B and D as outputs, ports C and E as inputs, disable pullups
+; Ports B and D as outputs, ports C and E as inputs, disable pullups except
+; for unused pins (PC1-5, PE3).
+ldi	tmp_lo,		0x3e
+out	PORTC,		tmp_lo
+ldi	tmp_lo,		0x08
+out	PORTE,		tmp_lo
+
 ser	tmp_lo
 out	DDRB,		tmp_lo
 out	DDRD,		tmp_lo
@@ -496,11 +502,8 @@ out	DDRD,		tmp_lo
 clr	tmp_lo
 out	DDRC,		tmp_lo
 out	DDRE,		tmp_lo
-out	PORTC,		tmp_lo
-out	PORTE,		tmp_lo
 
 out	PORTB,		tmp_lo
-out	PORTD,		tmp_lo
 
 ; TODO: check if our power supply has shorted data lines
 
