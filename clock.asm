@@ -80,13 +80,14 @@
 .def	tmp_hi			= r17
 .def	num_lo			= r18
 .def	num_hi			= r19
+.def	num_hi_old_close_hsd	= r24	; Previous number but with high side
+					; drivers closed
 
 ; Kernel scratchpad
 .def	ksp0			= r20
 .def	ksp1			= r21
 .def	ksp2			= r22
 .def	ksp3			= r23
-.def	ksp4			= r24
 
 
 
@@ -221,12 +222,14 @@ mov	z_cache_hi,		ZH
 update_display:
 
 ; Turn PFETs off for a couple cycles to discourage ghosting. They're slow to
-; turn on<->off (like 2 cycles), the gate capacitance is like 600pF. The low
-; side NPNs should turn on/off practically instantly since the required base
-; current is miniscule, so it won't differentially affect brightness that
-; PORTB low sides are open one cycle earlier than PORTD low sides.
-ldi	tmp_lo,			PFETS_FORCE_OFF
-out	PORTD,			tmp_lo
+; turn on<->off (like 2 cycles), the gate capacitance is like 600pF.
+;
+; The low side is driven by NPN transistors whose base capacitance is nothing
+; compared to the high side PFETs' gates. Thus it's best to turn off the high
+; side first and turn it back on last, so all the lines stop and start
+; receiving current at the same time, despite being on different ports and
+; thus having their low sides turned on on different clock cycles.
+out	PORTD,			num_hi_old_close_hsd
 
 mov	YL,			ticks
 inc	ticks
@@ -244,8 +247,8 @@ ldi	ZH,			high(nums << 1)
 subi	ZL,			(-low(nums << 1)) & 0xff
 sbci	ZH,			0xff
 
-; NPNs should be very quick to turn on/off since the base current used is
-; miniscule, so it should be fine to TODO fill this sentence
+ori	num_hi,			PFETS_FORCE_OFF
+mov	num_hi_old_close_hsd,	num_hi
 
 lpm	num_lo,			Z+
 lpm	num_hi,			Z
@@ -366,9 +369,9 @@ new_brightness_mask:
 
 	add	ksp1,		ksp0	; rnd.b += rnd.a
 
-	mov	ksp4,		ksp1
-	lsr	ksp4
-	add	rnd_c,		ksp4
+	mov	tmp_lo,		ksp1
+	lsr	tmp_lo
+	add	rnd_c,		tmp_lo
 	eor	rnd_c,		ksp0	; rnd.c = rnd.c + (rnd.b >> 1) ^ rnd.a
 
 	sts	rnd_a,		ksp0
@@ -438,6 +441,13 @@ ldi	tmp_lo,	high(RAMEND)
 out	SPH,	tmp_lo
 
 ldi	YH,	KRNLPAGE
+
+; First of all, charge high side driver gates thru internal pull-up resistors.
+; It'll something like 100us since the pull-ups could be as large as 60kohm,
+; and C_gs something like 600pF. DDRx registers are zeroed at reset (ie. ports
+; are inputs by default), we will configure port B as output later.
+ldi	num_hi_old_close_hsd,	PFETS_FORCE_OFF
+out	PORTD,			num_hi_old_close_hsd
 
 zero_memory:
 ldi	ZL,	low (SRAM_START)
