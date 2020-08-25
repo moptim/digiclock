@@ -76,8 +76,6 @@
 .def	blinked_num		= r15
 
 ; Read-only for user, used by timer ISR
-.def	tmp_lo			= r16
-.def	tmp_hi			= r17
 .def	num_lo			= r18
 .def	num_hi			= r19
 .def	num_hi_old_close_hsd	= r24	; Previous number but with high side
@@ -88,6 +86,8 @@
 .def	ksp1			= r21
 .def	ksp2			= r22
 .def	ksp3			= r23
+.def	ksp4			= r16
+.def	ksp5			= r17
 
 
 
@@ -126,20 +126,20 @@ brpl	@1
 .endmacro
 
 ; Params:  ksp0:   old
-;          tmp_lo: new
+;          ksp4:   new
 ;          ksp2:   alpha
 
 ; Returns: ksp1:   next confidence value
 
-; Thrashes:tmp_hi, ksp2, r0, r1
+; Thrashes:ksp5, ksp2, r0, r1
 .macro	exponential_filter_isr	; 11 cycles
-	ser	tmp_hi
-	sub	tmp_hi,		ksp2	; inv_alpha
+	ser	ksp5
+	sub	ksp5,		ksp2	; inv_alpha
 	inc	ksp2			; alpha_p1
 
-	mul	ksp0,		tmp_hi
+	mul	ksp0,		ksp5
 	movw	ksp1:ksp0,	r1:r0
-	mul	tmp_lo,		ksp2
+	mul	ksp4,		ksp2
 	add	ksp0,		r0
 	adc	ksp1,		r1
 .endmacro
@@ -203,11 +203,11 @@ ser	XH
 
 ; Using a random number in [-64, -1], not [0, 63], to eat away spectral
 ; peaks
-mov	tmp_lo,			rnd_c
-ori	tmp_lo,			~TMR_RELOAD_RANGE
-subi	tmp_lo,			(-TMR_RELOAD) & 0xff
+mov	ksp4,			rnd_c
+ori	ksp4,			~TMR_RELOAD_RANGE
+subi	ksp4,			(-TMR_RELOAD) & 0xff
 
-out	TCNT0,			tmp_lo
+out	TCNT0,			ksp4
 
 push	r0
 push	r1
@@ -265,15 +265,15 @@ and	num_hi,			ksp0		; save for next one
 
 ; TODO: 41 cycles + latency
 read_digital_io:
-mov	tmp_lo,			ticks
-andi	tmp_lo,			ZC_PRESCALER_MASK
+mov	ksp4,			ticks
+andi	ksp4,			ZC_PRESCALER_MASK
 brne	digiio_no_zc_check
 
 digiio_zc_check:
 	; Translate ZC bit: 0 -> 0, 1 -> 255
-	clr	tmp_lo
+	clr	ksp4
 	sbic	PINE,		2
-	ser	tmp_lo
+	ser	ksp4
 
 	lds	ksp0,		zc_confidence
 	ldi	ksp2,		ZC_ALPHA
@@ -287,23 +287,23 @@ digiio_zc_check:
 
 ; Assumes that BTN_PRESCALER_MASK > 3 and (BTN_PRESCALER_MASK & 3) == 3
 digiio_no_zc_check:
-mov	tmp_lo,		ticks
-andi	tmp_lo,		BTN_PRESCALER_MASK
-cpi	tmp_lo,		BTN0_TICK
+mov	ksp4,		ticks
+andi	ksp4,		BTN_PRESCALER_MASK
+cpi	ksp4,		BTN0_TICK
 breq	btn0_check
-cpi	tmp_lo,		BTN1_TICK
+cpi	ksp4,		BTN1_TICK
 breq	btn1_check
 
-andi	tmp_lo,		3
-cpi	tmp_lo,		1
+andi	ksp4,		3
+cpi	ksp4,		1
 breq	new_brightness_mask
 return_from_isr
 
 btn0_check:
 	; Translate BTN0 bit: 1 -> 0, 0 -> 255
-	clr	tmp_lo
+	clr	ksp4
 	sbis	PINE,			0
-	ser	tmp_lo
+	ser	ksp4
 
 	lds	ksp0,			btn0_confidence
 	ldi	ksp2,			BTN_ALPHA
@@ -317,9 +317,9 @@ btn0_check:
 
 btn1_check:
 	; Translate BTN1 bit: 1 -> 0, 0 -> 255
-	clr	tmp_lo
+	clr	ksp4
 	sbis	PINE,			1
-	ser	tmp_lo
+	ser	ksp4
 
 	lds	ksp0,			btn1_confidence
 	; TODO 57
@@ -333,25 +333,25 @@ btn1_check:
 	rjmp	update_digital_state_isr_iret
 
 new_brightness_mask:
-	; Use tmp_lo:brightness_disparity_hi as 16-bit correction, note though
-	; that "hi" is lo and "lo" is hi
-	clr	tmp_lo
+	; Use ksp4:brightness_disparity_hi as 16-bit correction, note though
+	; that here "disparity_hi" is effectively lo and ksp4 is hi
+	clr	ksp4
 	sbrc	brightness_disparity_hi,	7
-	ser	tmp_lo
+	ser	ksp4
 
-	; And tmp_hi:ksp3 as 16-bit brightness, ksp3 will be corrected
+	; And ksp5:ksp3 as 16-bit brightness, ksp3 will be corrected
 	; brightness threshold
-	clr	tmp_hi
+	clr	ksp5
 	mov	ksp3,		brightness
 
 	sub	ksp3,		brightness_disparity_hi
-	sbc	tmp_hi,		tmp_lo
+	sbc	ksp5,		ksp4
 
-	; If bit 7 is set in tmp_hi, we went negative - use 0 as corrected
+	; If bit 7 is set in ksp5, we went negative - use 0 as corrected
 	; threshold. If bit 0 instead is set there, we use 255.
-	sbrc	tmp_hi,		7
+	sbrc	ksp5,		7
 	clr	ksp3
-	sbrc	tmp_hi,		0
+	sbrc	ksp5,		0
 	ser	ksp3
 
 	nbm_rerandom:
@@ -365,9 +365,9 @@ new_brightness_mask:
 
 	add	ksp1,		ksp0	; rnd.b += rnd.a
 
-	mov	tmp_lo,		ksp1
-	lsr	tmp_lo
-	add	rnd_c,		tmp_lo
+	mov	ksp4,		ksp1
+	lsr	ksp4
+	add	rnd_c,		ksp4
 	eor	rnd_c,		ksp0	; rnd.c = rnd.c + (rnd.b >> 1) ^ rnd.a
 
 	sts	rnd_a,		ksp0
@@ -397,7 +397,7 @@ new_brightness_mask:
 
 ; Returns: ksp0: next state
 
-; Thrashes:ksp2, ksp3, tmp_lo, YL
+; Thrashes:ksp2, ksp3, ksp4, YL
 
 ; Side effects: Increments *(u8 *)Y upon L->H edge
 update_digital_state_isr_iret:
@@ -431,10 +431,10 @@ update_digital_state_isr_iret:
 
 
 start:
-ldi	tmp_lo,	low (RAMEND)
-out	SPL,	tmp_lo
-ldi	tmp_lo,	high(RAMEND)
-out	SPH,	tmp_lo
+ldi	ksp4,	low (RAMEND)
+out	SPL,	ksp4
+ldi	ksp4,	high(RAMEND)
+out	SPH,	ksp4
 
 ldi	YH,	KRNLPAGE
 
@@ -448,104 +448,104 @@ out	PORTD,			num_hi_old_close_hsd
 zero_memory:
 ldi	ZL,	low (SRAM_START)
 ldi	ZH,	high(SRAM_START)
-clr	tmp_lo
+clr	ksp4
 zeroloop:
-	st	Z+,	tmp_lo
+	st	Z+,	ksp4
 	cpi	ZH,	high(SRAM_START + SRAM_SIZE)
 	brlo	zeroloop
 	cpi	ZL,	low (SRAM_START + SRAM_SIZE)
 	brlo	zeroloop
 
 ; TODO TODO TODO TEST TEST
-ldi	tmp_lo,		1
-sts	hrs_hi,		tmp_lo
-ldi	tmp_lo,		3
-sts	hrs_lo,		tmp_lo
-ldi	tmp_lo,		5
-sts	mns_hi,		tmp_lo
-ldi	tmp_lo,		7
-sts	mns_lo,		tmp_lo
+ldi	ksp4,		1
+sts	hrs_hi,		ksp4
+ldi	ksp4,		3
+sts	hrs_lo,		ksp4
+ldi	ksp4,		5
+sts	mns_hi,		ksp4
+ldi	ksp4,		7
+sts	mns_lo,		ksp4
 
 ldi	num_hi,		PFETS_FORCE_OFF
 
 do_pfet_masks:
-ldi	tmp_lo,		PFET0_MASK
-sts	pfet_masks + 0,	tmp_lo
-ldi	tmp_lo,		PFET1_MASK
-sts	pfet_masks + 1,	tmp_lo
-ldi	tmp_lo,		PFET2_MASK
-sts	pfet_masks + 2,	tmp_lo
-ldi	tmp_lo,		PFET3_MASK
-sts	pfet_masks + 3,	tmp_lo
+ldi	ksp4,		PFET0_MASK
+sts	pfet_masks + 0,	ksp4
+ldi	ksp4,		PFET1_MASK
+sts	pfet_masks + 1,	ksp4
+ldi	ksp4,		PFET2_MASK
+sts	pfet_masks + 2,	ksp4
+ldi	ksp4,		PFET3_MASK
+sts	pfet_masks + 3,	ksp4
 
 init_adc:
 ; Use AVCC, 8-bit ADC, single-ended Channel 0
-ldi	tmp_lo,		0x60
-sts	ADMUX,		tmp_lo
+ldi	ksp4,		0x60
+sts	ADMUX,		ksp4
 
 ; Enable ADC, start conversion, use ADC prescaler 128
-ldi	tmp_lo,		0xc7
-sts	ADCSRA,		tmp_lo
+ldi	ksp4,		0xc7
+sts	ADCSRA,		ksp4
 
 init_io:
 ; Ports B and D as outputs, ports C and E as inputs, disable pullups except
 ; for unused pins (PC1-5, PE3).
-ldi	tmp_lo,		0x3e
-out	PORTC,		tmp_lo
-ldi	tmp_lo,		0x08
-out	PORTE,		tmp_lo
+ldi	ksp4,		0x3e
+out	PORTC,		ksp4
+ldi	ksp4,		0x08
+out	PORTE,		ksp4
 
-ser	tmp_lo
-out	DDRB,		tmp_lo
-out	DDRD,		tmp_lo
+ser	ksp4
+out	DDRB,		ksp4
+out	DDRD,		ksp4
 
-clr	tmp_lo
-out	DDRC,		tmp_lo
-out	DDRE,		tmp_lo
+clr	ksp4
+out	DDRC,		ksp4
+out	DDRE,		ksp4
 
-out	PORTB,		tmp_lo
+out	PORTB,		ksp4
 
 ; TODO: check if our power supply has shorted data lines
 
 init_timer_irq:
 ; Prescaler 1, normal mode, etc
-clr	tmp_lo
-out	TCCR0A,		tmp_lo
-ldi	tmp_lo,		1
-out	TCCR0B,		tmp_lo
+clr	ksp4
+out	TCCR0A,		ksp4
+ldi	ksp4,		1
+out	TCCR0B,		ksp4
 
 ; Reload the timer...
-ldi	tmp_lo,		TMR_RELOAD
-out	TCNT0,		tmp_lo
+ldi	ksp4,		TMR_RELOAD
+out	TCNT0,		ksp4
 
 ; And enable overflow interrupt
-ldi	tmp_lo,		1
-sts	TIMSK0,		tmp_lo
+ldi	ksp4,		1
+sts	TIMSK0,		ksp4
 
 
 ; Assumes that ADC_INTERVAL and ZC_FREQ fit in 8 bits and SRAM is already
 ; cleared
 init_locals:
-ldi	tmp_lo,		ADC_INTERVAL
-sts	next_adc_read,	tmp_lo
-ldi	tmp_lo,		ZC_FREQ
-sts	next_second_zc,	tmp_lo
+ldi	ksp4,		ADC_INTERVAL
+sts	next_adc_read,	ksp4
+ldi	ksp4,		ZC_FREQ
+sts	next_second_zc,	ksp4
 
-ldi	tmp_lo,		2
-mov	blinked_num,	tmp_lo
+ldi	ksp4,		2
+mov	blinked_num,	ksp4
 
 ; TODO TODO TODO
-ldi	tmp_lo,		230
-mov	brightness,	tmp_lo
+ldi	ksp4,		230
+mov	brightness,	ksp4
 
 ; Turn on watchdog, 16ms timer
 wdr
-lds	tmp_lo,		WDTCSR
-ori	tmp_lo,		(1 << WDCE) | (1 << WDE)
-sts	WDTCSR,		tmp_lo
+lds	ksp4,		WDTCSR
+ori	ksp4,		(1 << WDCE) | (1 << WDE)
+sts	WDTCSR,		ksp4
 
-ldi	tmp_lo,		(1 << WDE)
-sts	WDTCSR,		tmp_lo
+ldi	ksp4,		(1 << WDE)
+sts	WDTCSR,		ksp4
 
 
 sei
