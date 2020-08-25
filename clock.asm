@@ -144,11 +144,6 @@ brpl	@1
 .endmacro
 
 .DSEG
-; The assembler seems to think it can abuse extended IO registers as more
-; SRAM.. No way, I need to have it start at 0x100 so I can have important
-; stuff at page offsets < 0x3f. Who thought an assembler would not need an
-; alignment operand?
-cut_the_crap_john:	.byte 0x100 - 0x60
 
 time:			.byte 5		; u8 * 5; has to be in first 63B
 pfet_masks:		.byte 4		; u8 * 4; ditto
@@ -209,7 +204,7 @@ ser	XH
 ; peaks
 mov	tmp_lo,			rnd_c
 ori	tmp_lo,			~TMR_RELOAD_RANGE
-subi	tmp_lo,			-TMR_RELOAD
+subi	tmp_lo,			(-TMR_RELOAD) & 0xff
 
 out	TCNT0,			tmp_lo
 
@@ -648,7 +643,7 @@ read_adc_adjust_brightness:
 
 	clr	ur0
 	dec	ur0
-	lds	ur1,		ADCL
+	lds	ur1,		ADCH
 	sub	ur0,		ur1
 
 	lds	ur1,		raw_brightness
