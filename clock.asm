@@ -120,6 +120,7 @@ brpl	@1
 	pop	r1
 	pop	r0
 	out	SREG,		sreg_cache
+	wdr
 	clr	XH	; TODO TODO TODO TODO
 	reti
 .endmacro
@@ -533,6 +534,15 @@ mov	blinked_num,	tmp_lo
 ; TODO TODO TODO
 ldi	tmp_lo,		230
 mov	brightness,	tmp_lo
+
+; Turn on watchdog, 16ms timer
+wdr
+lds	tmp_lo,		WDTCSR
+ori	tmp_lo,		(1 << WDCE) | (1 << WDE)
+sts	WDTCSR,		tmp_lo
+
+ldi	tmp_lo,		(1 << WDE)
+sts	WDTCSR,		tmp_lo
 
 
 sei
