@@ -52,9 +52,6 @@
 .equ	PFETS_FORCE_OFF		= ~(PFET0_MASK & PFET1_MASK & PFET2_MASK & PFET3_MASK)
 
 .def	brightness_mask		= r4
-.def	brightness_disparity_lo = r5
-.def	brightness_disparity_hi = r6
-
 .def	rnd_c			= r7
 
 ; Keep status register here during ISR...
@@ -65,6 +62,7 @@
 .def	z_cache_hi		= r3
 
 .def	ticks			= r9
+.def	brightness_ticks	= r24
 
 ; User-writable registers. Also r0, r1 and Z are ok to use
 .def	ur0			= r25
@@ -78,8 +76,6 @@
 ; Read-only for user, used by timer ISR
 .def	num_lo			= r18
 .def	num_hi			= r19
-.def	num_hi_old_close_hsd	= r24	; Previous number but with high side
-					; drivers closed
 
 ; Kernel scratchpad
 .def	ksp0			= r20
@@ -120,8 +116,6 @@ brpl	@1
 	pop	r1
 	pop	r0
 	out	SREG,		sreg_cache
-	wdr
-	clr	XH	; TODO TODO TODO TODO
 	reti
 .endmacro
 
@@ -190,17 +184,6 @@ rjmp	start
 .org TIMER0_OVFaddr
 in	sreg_cache,		SREG
 
-; TODO: speed check
-tst	XH
-breq	not_late
-cli
-sleep
-
-not_late:
-sei
-ser	XH
-; /TODO
-
 ; Using a random number in [-64, -1], not [0, 63], to eat away spectral
 ; peaks
 mov	ksp4,			rnd_c
@@ -225,26 +208,27 @@ update_display:
 ; side first and turn it back on last, so all the lines stop and start
 ; receiving current at the same time, despite being on different ports and
 ; thus having their low sides turned on on different clock cycles.
-out	PORTD,			num_hi_old_close_hsd
+ldi	YL,			PFETS_FORCE_OFF
+out	PORTD,			YL
+clr	YL
+out	PORTB,			YL
 
+wdr
 mov	YL,			ticks
 inc	ticks
-
-out	PORTB,			num_lo
-out	PORTD,			num_hi
 
 ldi	YH,			high(time)
 andi	YL,			0x03
 ldd	ZL,			Y + low(time)
 ldd	ksp0,			Y + low(pfet_masks)
 
+out	PORTB,			num_lo
+out	PORTD,			num_hi
+
 lsl	ZL
 ldi	ZH,			high(nums << 1)
 subi	ZL,			(-low(nums << 1)) & 0xff
 sbci	ZH,			0xff
-
-ori	num_hi,			PFETS_FORCE_OFF
-mov	num_hi_old_close_hsd,	num_hi
 
 lpm	num_lo,			Z+
 lpm	num_hi,			Z
@@ -333,28 +317,14 @@ btn1_check:
 	rjmp	update_digital_state_isr_iret
 
 new_brightness_mask:
-	; Use ksp4:brightness_disparity_hi as 16-bit correction, note though
-	; that here "disparity_hi" is effectively lo and ksp4 is hi
-	clr	ksp4
-	sbrc	brightness_disparity_hi,	7
-	ser	ksp4
+	inc	brightness_ticks
+	andi	brightness_ticks, 0x3f
+	clr	brightness_mask
+	cp	brightness_ticks,	brightness
+	brsh	rerandom
+		dec		brightness_mask
 
-	; And ksp5:ksp3 as 16-bit brightness, ksp3 will be corrected
-	; brightness threshold
-	clr	ksp5
-	mov	ksp3,		brightness
-
-	sub	ksp3,		brightness_disparity_hi
-	sbc	ksp5,		ksp4
-
-	; If bit 7 is set in ksp5, we went negative - use 0 as corrected
-	; threshold. If bit 0 instead is set there, we use 255.
-	sbrc	ksp5,		7
-	clr	ksp3
-	sbrc	ksp5,		0
-	ser	ksp3
-
-	nbm_rerandom:
+	rerandom:
 	lds	ksp0,		rnd_a
 	lds	ksp1,		rnd_b
 	lds	ksp2,		rnd_x
@@ -374,20 +344,6 @@ new_brightness_mask:
 	sts	rnd_b,		ksp1
 	sts	rnd_x,		ksp2
 
-	clr	brightness_mask
-	cp	rnd_c,		ksp3
-	brcc	nbm_nozero_britemask
-		dec brightness_mask
-
-	nbm_nozero_britemask:
-	clr	ksp2
-	add	brightness_disparity_lo,	brightness_mask
-	adc	brightness_disparity_hi,	ksp2
-
-	sub	brightness_disparity_lo,	brightness
-	sbc	brightness_disparity_lo,	ksp2
-
-	; 90 cycles up to here?
 	return_from_isr
 
 ; Params:  ksp1: current confidence
@@ -442,8 +398,8 @@ ldi	YH,	KRNLPAGE
 ; It'll something like 100us since the pull-ups could be as large as 60kohm,
 ; and C_gs something like 600pF. DDRx registers are zeroed at reset (ie. ports
 ; are inputs by default), we will configure port B as output later.
-ldi	num_hi_old_close_hsd,	PFETS_FORCE_OFF
-out	PORTD,			num_hi_old_close_hsd
+ldi	ksp4,	PFETS_FORCE_OFF
+out	PORTD,	ksp4
 
 zero_memory:
 ldi	ZL,	low (SRAM_START)
@@ -457,13 +413,13 @@ zeroloop:
 	brlo	zeroloop
 
 ; TODO TODO TODO TEST TEST
-ldi	ksp4,		1
+ldi	ksp4,		0
 sts	hrs_hi,		ksp4
-ldi	ksp4,		3
+ldi	ksp4,		0
 sts	hrs_lo,		ksp4
-ldi	ksp4,		5
+ldi	ksp4,		0
 sts	mns_hi,		ksp4
-ldi	ksp4,		7
+ldi	ksp4,		0
 sts	mns_lo,		ksp4
 
 ldi	num_hi,		PFETS_FORCE_OFF
@@ -492,7 +448,7 @@ init_io:
 ; for unused pins (PC1-5, PE3).
 ldi	ksp4,		0x3e
 out	PORTC,		ksp4
-ldi	ksp4,		0x08
+ldi	ksp4,		0x0c ; TODO: pull up PE2 as well, was 0x08
 out	PORTE,		ksp4
 
 ser	ksp4
@@ -535,7 +491,7 @@ ldi	ksp4,		2
 mov	blinked_num,	ksp4
 
 ; TODO TODO TODO
-ldi	ksp4,		230
+ldi	ksp4,		0x08
 mov	brightness,	ksp4
 
 ; Turn on watchdog, 16ms timer
@@ -650,9 +606,43 @@ read_adc_adjust_brightness:
 	push	ZL
 	push	ZH
 
+	; TODO TODO DBG
+	clr	ur0
+	inc	ur0
+	inc	ur0
+	sts	mns_lo,		ur0
+	sts	mns_hi,		ur0
+	sts	hrs_lo,		ur0
+	sts	hrs_hi,		ur0
+
 	lds	ur0,		ADCSRA
 	sbrc	ur0,		ADSC		; Still converting?
 		rjmp		adc_out_carry
+
+	; TODO: show brightness in base-4, from ur3
+	ldi	ZL,		0x03
+	mov	ur0,		ur3
+	mov	ur2,		ur0
+	and	ur2,		ZL
+	sts	mns_lo,		ur2
+
+	lsr	ur0
+	lsr	ur0
+	mov	ur2,		ur0
+	and	ur2,		ZL
+	sts	mns_hi,		ur2
+
+	lsr	ur0
+	lsr	ur0
+	mov	ur2,		ur0
+	and	ur2,		ZL
+	sts	hrs_lo,		ur2
+
+	lsr	ur0
+	lsr	ur0
+	and	ur0,		ZL
+	sts	hrs_hi,		ur0
+	; </tODO>
 
 	clr	ur0
 	dec	ur0
@@ -663,6 +653,7 @@ read_adc_adjust_brightness:
 	ldi	ZL,		BRIGHTNESS_ALPHA
 	mov	ur2,		ZL
 	rcall	exponential_filter_user
+
 
 	cp	ur3,		ur1
 	breq	adc_noupdate
