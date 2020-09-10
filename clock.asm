@@ -9,7 +9,7 @@
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
 .equ	TICK_FREQ		= 1024
-.equ	ADC_FREQ		= 2
+.equ	ADC_FREQ		= 1024
 .equ	ZC_FREQ			= 100
 
 ; This works differently from the C source, synchronize ADC to zero crossings
@@ -162,9 +162,11 @@ next_blink_tick:	.byte 2		; u16
 next_second_tick:	.byte 2		; u16
 btn0_presses_seen:	.byte 2		; u16
 btn1_presses_seen:	.byte 2		; u16
-raw_brightness:		.byte 1
+brightness:		.byte 1
 seconds:		.byte 4		; u32 - grand total of seconds, for
 					; clock synchronization
+brite_error_accum:	.byte 2		; u16
+adc_old_val:		.byte 1
 
 .equ	KRNLPAGE	= high(SRAM_START)
 
@@ -515,6 +517,7 @@ sts	next_second_tick + 0,	ksp4
 ldi	ksp4,			high(ZC_FREQ)
 sts	next_second_tick + 1,	ksp4
 
+; TODO
 ldi	ksp4,			0
 mov	blinked_num,		ksp4
 
@@ -594,36 +597,24 @@ time_after:
 	cpc	ur3,		ur1
 	ret
 
-; Params:  ur0:    old
-;          ur1:    new
-;          ur2:    alpha
-; Returns: ur3:    next confidence value
-exponential_filter_user:
-	push	ZL
-	push	ur0
-	push	ur1
+; If abs(error) < threshold, return 0. Otherwise return error
+; Params: ur1:     threshold
+;         ur3:ur2: error
+;
+; Returns thresholded error in ur3:ur2
+ignore_small_errors:
 	push	ur2
 
-	ser	ZL
-	sub	ZL,		ur2
-	inc	ur2
-
-	mul	ur0,		ZL
-	mov	ur0,		r0
-	mov	ur3,		r1
-
-	mul	ur1,		ur2
-	add	ur0,		r0
-	adc	ur3,		r1
-
-	; Round, not just floor
-	sbrc	ur0,		7
-	inc	ur3
-
+	; Abs. This is correct, because our range is [-255, 255], and its
+	; absolute value will always fit in 8 bits.
+	sbrc	ur3,		7
+	neg	ur2
+	cp	ur2,		ur1
 	pop	ur2
-	pop	ur1
-	pop	ur0
-	pop	ZL
+	brsh	nozero
+		clr	ur2
+		clr	ur3
+	nozero:
 	ret
 
 read_adc_adjust_brightness:
@@ -634,72 +625,76 @@ read_adc_adjust_brightness:
 	push	ZL
 	push	ZH
 
-	lds	ur0,		ADCSRA
-	sbrc	ur0,		ADSC
-		rjmp	adc_out_carry
+	lds	ur0,			ADCSRA
+	lds	ur1,			ADCH
+	sbrc	ur0,			ADSC
+		lds	ur1,			adc_old_val
+	sts	adc_old_val,		ur1
 
-	clr	ur0
-	dec	ur0
-	lds	ur1,		ADCH
-	sub	ur0,		ur1
+	; ur0 is measured value
+	ser	ur0
+	sub	ur0,			ur1
 
-	lds	ur1,		raw_brightness
-	ldi	ZL,		BRIGHTNESS_ALPHA
-	mov	ur2,		ZL
-	rcall	exponential_filter_user
+	lds	ur2,			brightness
+	clr	ur3
 
-	cp	ur3,		ur1
-	breq	adc_noupdate
-		sts	raw_brightness,	ur3
+	; ur1 is desirability of current brightness setting
+	ldi	ZL,			low (desirabilities << 1)
+	ldi	ZH,			high(desirabilities << 1)
+	add	ZL,			ur2
+	adc	ZH,			ur3
+	lpm	ur1,			Z
 
-		; Get actual brightness value from table
-		clr	ur1
-		lsl	ur3
-		rol	ur1
-		; Read corresponding entry from brightness table
-		ldi	ZL,			low (brightness_table << 1)
-		ldi	ZH,			high(brightness_table << 1)
-		add	ZL,			ur3
-		adc	ZH,			ur1
-		lpm	brightness_num,		Z+
-		lpm	brightness_denom,	Z
+	; ur3:ur2 is (current - measured) clamped
+	sub	ur2,			ur0
+	sbc	ur3,			ur3
+	rcall	ignore_small_errors
 
-	lds	ur3,		ADCH
-	mov	ur0,		ur3
-	andi	ur0,		3
-	sts	mns_lo,		ur0
+	lds	ZL,			brite_error_accum + 0
+	lds	ZH,			brite_error_accum + 1
+	add	ZL,			ur2
+	adc	ZH,			ur3
 
-	lsr	ur3
-	lsr	ur3
-	mov	ur0,		ur3
-	andi	ur0,		3
-	sts	mns_hi,		ur0
+	; Divide error accumulator by 4096, and correct reading if needed
+	mov	ur0,			ZH
+	asr	ur0
+	asr	ur0
+	asr	ur0
+	asr	ur0
 
-	lsr	ur3
-	lsr	ur3
-	mov	ur0,		ur3
-	andi	ur0,		3
-	sts	hrs_lo,		ur0
+	lds	ur2,			brightness
+	sub	ur2,			ur0
+	sts	brightness,		ur2
 
-	lsr	ur3
-	lsr	ur3
-	mov	ur0,		ur3
-	andi	ur0,		3
-	sts	hrs_hi,		ur0
+	; If we correct, subtract corresponding value from accum
+	mov	ur1,			ur0
+	lsl	ur1
+	lsl	ur1
+	lsl	ur1
+	lsl	ur1
+	sub	ZH,			ur1
 
+	sts	brite_error_accum + 0,	ZL
+	sts	brite_error_accum + 1,	ZH
 
-	; Start reading next value
+	; Get actual brightness value from table
+	clr	ur1
+	lsl	ur2
+	rol	ur1
+	; Read corresponding entry from brightness table
+	ldi	ZL,			low (brightness_table << 1)
+	ldi	ZH,			high(brightness_table << 1)
+	add	ZL,			ur2
+	adc	ZH,			ur1
+	lpm	brightness_num,		Z+
+	lpm	brightness_denom,	Z
+
+	; Start reading next value and yeet outta here
 	adc_noupdate:
 	lds	ZL,		ADCSRA
 	ori	ZL,		(1 << ADSC)
 	sts	ADCSRA,		ZL
-	clc
-	rjmp	adc_out
 
-	adc_out_carry:
-		sec
-
-	adc_out:
 	pop	ZH
 	pop	ZL
 	pop	ur3
@@ -865,3 +860,24 @@ brightness_table:
 .db 0xe8, 0xff, 0xe9, 0xff, 0x4e, 0x55, 0x2f, 0x33, 0xec, 0xff, 0x4f, 0x55, 0x0e, 0x0f, 0xef, 0xff
 .db 0x10, 0x11, 0xf1, 0xff, 0xf2, 0xff, 0x51, 0x55, 0xf4, 0xff, 0x31, 0x33, 0x52, 0x55, 0xf7, 0xff
 .db 0xf8, 0xff, 0x53, 0x55, 0x32, 0x33, 0xfb, 0xff, 0x54, 0x55, 0xfd, 0xff, 0xfe, 0xff, 0x01, 0x01
+
+; Some brightnesses are more desirable than others, because they cycle quicker
+; (1/6 cycle PWMing has less low frequency components than 33/200 for example).
+; Also hand remove the huge desirability from zero.
+desirabilities:
+.db 0x00, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10
+.db 0x00, 0x10, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00
+.db 0x00, 0x08, 0x10, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00
+.db 0x08, 0x00, 0x08, 0x18, 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08
+.db 0x00, 0x08, 0x08, 0x00, 0x10, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00
+.db 0x08, 0x08, 0x00, 0x00, 0x08, 0x18, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08
+.db 0x08, 0x00, 0x00, 0x08, 0x08, 0x00, 0x18, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08
+.db 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x10, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00
+.db 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x10, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00
+.db 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x18, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08
+.db 0x08, 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x18, 0x08, 0x00, 0x00, 0x08, 0x08
+.db 0x00, 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x10, 0x00, 0x08, 0x08, 0x00
+.db 0x08, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00, 0x18, 0x08, 0x00, 0x08
+.db 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08, 0x10, 0x08, 0x00
+.db 0x00, 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x10, 0x00
+.db 0x10, 0x00, 0x00, 0x08, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00, 0x20
