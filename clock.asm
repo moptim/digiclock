@@ -432,16 +432,6 @@ zeroloop:
 	cpi	ZL,	low (SRAM_START + SRAM_SIZE)
 	brlo	zeroloop
 
-; TODO TODO TODO TEST TEST
-ldi	ksp4,		0
-sts	hrs_hi,		ksp4
-ldi	ksp4,		0
-sts	hrs_lo,		ksp4
-ldi	ksp4,		0
-sts	mns_hi,		ksp4
-ldi	ksp4,		0
-sts	mns_lo,		ksp4
-
 ldi	num_hi,		PFETS_FORCE_OFF
 
 do_pfet_masks:
@@ -604,10 +594,8 @@ mainloop:
 ; ur2:ur3: timestamp B
 ; Sets negative flag if A is after B, clears if not
 time_after:
-	push	ur3
 	cp	ur2,		ur0
-	sbc	ur3,		ur1
-	pop	ur3
+	cpc	ur3,		ur1
 	ret
 
 ; Params:  ur0:    old
