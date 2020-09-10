@@ -8,20 +8,21 @@
 .equ	IRQ_MAXFREQ		= 75000
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
+.equ	TICK_FREQ		= 1024
+.equ	ADC_FREQ		= 128
 .equ	ZC_FREQ			= 100
-.equ	ADC_FREQ		= ZC_FREQ
 
 ; This works differently from the C source, synchronize ADC to zero crossings
 ; so we only need to keep a 8-bit tick counter
-.equ	ADC_INTERVAL		= ((ZC_FREQ) / (ADC_FREQ))
+.equ	ADC_INTERVAL		= ((TICK_FREQ) / (ADC_FREQ))
 
 ; Has to be 2^n - 1 because it's a bitmask. A random number at most this large
 ; is added to TMR_RELOAD at the start of each IRQ, to spread out the IRQ
 ; frequency spikes in output signals.
 .equ	TMR_RELOAD_RANGE	= 31
 
-.equ	BLINK_TOGGLE_FREQ	= 4
-.equ	BLINK_ZC_COUNT		= ((ZC_FREQ) / (BLINK_TOGGLE_FREQ))
+.equ	BLINK_TOGGLE_FREQ	= 3
+.equ	BLINK_TICK_COUNT	= ((TICK_FREQ) / (BLINK_TOGGLE_FREQ))
 
 .equ	BTN_PRESCALER_MASK	= 0x0f	;  4 kHz
 .equ	ZC_PRESCALER_MASK	= 0x01	; 32 kHz
@@ -70,7 +71,7 @@
 .def	ur2			= r11
 .def	ur3			= r12
 .def	brightness_num		= r13
-.def	brightness_denom	= r6
+.def	brightness_denom	= r7
 .def	blink_mask		= r14
 .def	blinked_num		= r15
 
@@ -99,7 +100,7 @@
 lds	ur3,		@0 + 1
 lds	ur2,		@0 + 0
 
-rcall		time_after
+rcall	time_after
 brpl	@1
 
 	rcall	@2
@@ -153,11 +154,12 @@ btn1_state:		.byte 1
 zero_crossings:		.byte 2		; u16
 btn0_presses:		.byte 2		; u16
 btn1_presses:		.byte 2		; u16
+ticks_1khz:		.byte 2		; u16
 
 ; User variables
 next_adc_read:		.byte 2		; u16
-next_blink_zc:		.byte 2		; u16
-next_second_zc:		.byte 2		; u16
+next_blink_tick:	.byte 2		; u16
+next_second_tick:	.byte 2		; u16
 btn0_presses_seen:	.byte 2		; u16
 btn1_presses_seen:	.byte 2		; u16
 raw_brightness:		.byte 1
@@ -282,7 +284,19 @@ breq	btn1_check
 andi	ksp4,		3
 cpi	ksp4,		1
 breq	new_brightness_mask
-return_from_isr
+
+; Has 1kHz timer advanced?
+sbis	TIFR2,		0
+	rjmp		exit_isr
+sbi	TIFR2,		0
+
+lds	ZL,		ticks_1khz + 0
+lds	ZH,		ticks_1khz + 1
+adiw	ZH:ZL,		1
+sts	ticks_1khz + 0,	ZL
+sts	ticks_1khz + 1,	ZH
+
+rjmp	exit_isr
 
 btn0_check:
 	; Translate BTN0 bit: 1 -> 0, 0 -> 255
@@ -349,6 +363,7 @@ new_brightness_mask:
 	sts	rnd_b,		ksp1
 	sts	rnd_x,		ksp2
 
+exit_isr:
 	return_from_isr
 
 ; Params:  ksp1: current confidence
@@ -483,33 +498,48 @@ out	TCNT0,		ksp4
 ldi	ksp4,		1
 sts	TIMSK0,		ksp4
 
+init_1khz_timer:
+; Prescaler 32 (will overflow at 1kHz), normal mode
+clr	ksp4
+sts	TCCR2A,		ksp4
+ldi	ksp4,		3
+sts	TCCR2B,		ksp4
+
+; Reset it
+clr	ksp4
+sts	TCNT2,		ksp4
 
 ; Assumes that ADC_INTERVAL and ZC_FREQ fit in 8 bits and SRAM is already
 ; cleared
 init_locals:
-ldi	ksp4,		ADC_INTERVAL
-sts	next_adc_read,	ksp4
-ldi	ksp4,		ZC_FREQ
-sts	next_second_zc,	ksp4
 
-ldi	ksp4,		2
-mov	blinked_num,	ksp4
+ldi	ksp4,			low (ADC_INTERVAL)
+sts	next_adc_read + 0,	ksp4
+ldi	ksp4,			high(ADC_INTERVAL)
+sts	next_adc_read + 1,	ksp4
+
+ldi	ksp4,			low (ZC_FREQ)
+sts	next_second_tick + 0,	ksp4
+ldi	ksp4,			high(ZC_FREQ)
+sts	next_second_tick + 1,	ksp4
+
+ldi	ksp4,			0
+mov	blinked_num,		ksp4
 
 ; TODO TODO TODO
 ldi	ksp4,			1
 mov	brightness_num,		ksp4
-ldi	ksp4,			40
+ldi	ksp4,			80
 mov	brightness_denom,	ksp4
 
 ; Turn on watchdog, 16ms timer
 wdr
-lds	ksp4,		WDTCSR
-ori	ksp4,		(1 << WDCE) | (1 << WDE)
-sts	WDTCSR,		ksp4
+lds	ksp4,			WDTCSR
+ori	ksp4,			(1 << WDCE) | (1 << WDE)
+sts	WDTCSR,			ksp4
 
-ldi	ksp4,		(1 << WDE)
-sts	WDTCSR,		ksp4
-
+ldi	ksp4,			(1 << WDE)
+sts	WDTCSR,			ksp4
 
 sei
 mainloop:
@@ -524,8 +554,8 @@ mainloop:
 	; benign glitch than accidentally getting 37ff instead, because then
 	; we would be 255 variable updates early.
 	ml_check_adc_time:
-	lds	ur1,		zero_crossings + 1
-	lds	ur0,		zero_crossings + 0
+	lds	ur1,		ticks_1khz + 1
+	lds	ur0,		ticks_1khz + 0
 
 	lds	ur3,		next_adc_read + 1
 	lds	ur2,		next_adc_read + 0
@@ -536,9 +566,9 @@ mainloop:
 		rcall	read_adc_adjust_brightness
 		brcs	ml_check_blink_time
 			; Increment ur2:ur3
-			ldi	ZL,		ADC_INTERVAL
+			ldi	ZL,		low (ADC_INTERVAL)
 			add	ur2,		ZL
-			ldi	ZL,		0
+			ldi	ZL,		high(ADC_INTERVAL)
 			adc	ur3,		ZL
 			sts	next_adc_read + 1,	ur3
 			sts	next_adc_read + 0,	ur2
@@ -549,32 +579,35 @@ mainloop:
 ;         @2      function to call if timer hass advanced past *(@0)
 ;         @3      event interval in timer ticks
 	ml_check_blink_time:
-	user_check_time_after	next_blink_zc,		ml_check_next_second_time, toggle_blink, BLINK_ZC_COUNT
+	user_check_time_after	next_blink_tick,	ml_check_next_second_time, toggle_blink, BLINK_TICK_COUNT
 
 	ml_check_next_second_time:
-	user_check_time_after	next_second_zc,		ml_check_btn0_presses,	advance_second, ZC_FREQ
+	user_check_time_after	next_second_tick,	ml_check_btn0_presses,	advance_second, TICK_FREQ
 
 	ml_check_btn0_presses:
-	lds	ur3,		btn0_presses + 1
-	lds	ur2,		btn0_presses + 0
+	lds	ur1,		btn0_presses + 1
+	lds	ur0,		btn0_presses + 0
 	user_check_time_after	btn0_presses_seen,	ml_check_btn1_presses,	advance_blink, 1
 
 	ml_check_btn1_presses:
-	lds	ur3,		btn1_presses + 1
-	lds	ur2,		btn1_presses + 0
+	lds	ur1,		btn1_presses + 1
+	lds	ur0,		btn1_presses + 0
 	user_check_time_after	btn1_presses_seen,	ml_continue,		advance_blinked_num, 1
 
 	ml_continue:
-	rjmp mainloop
+	;lds	ur0,	ticks_1khz + 1
+	;andi	ur0,	7
+	;sts	mns_lo,	ur0
+	rjmp	mainloop
 
 ; ur0:ur1: timestamp A
 ; ur2:ur3: timestamp B
 ; Sets negative flag if A is after B, clears if not
 time_after:
-	push	ur2
-	cp	ur3,		ur1
-	sbc	ur2,		ur0
-	pop	ur2
+	push	ur3
+	cp	ur2,		ur0
+	sbc	ur3,		ur1
+	pop	ur3
 	ret
 
 ; Params:  ur0:    old
@@ -613,44 +646,6 @@ read_adc_adjust_brightness:
 	push	ZL
 	push	ZH
 
-	; TODO TODO DBG
-	clr	ur0
-	inc	ur0
-	inc	ur0
-	sts	mns_lo,		ur0
-	sts	mns_hi,		ur0
-	sts	hrs_lo,		ur0
-	sts	hrs_hi,		ur0
-
-	lds	ur0,		ADCSRA
-	sbrc	ur0,		ADSC		; Still converting?
-		rjmp		adc_out_carry
-
-	; TODO: show brightness in base-4, from ur3
-	ldi	ZL,		0x03
-	mov	ur0,		ur3
-	mov	ur2,		ur0
-	and	ur2,		ZL
-	sts	mns_lo,		ur2
-
-	lsr	ur0
-	lsr	ur0
-	mov	ur2,		ur0
-	and	ur2,		ZL
-	sts	mns_hi,		ur2
-
-	lsr	ur0
-	lsr	ur0
-	mov	ur2,		ur0
-	and	ur2,		ZL
-	sts	hrs_lo,		ur2
-
-	lsr	ur0
-	lsr	ur0
-	and	ur0,		ZL
-	sts	hrs_hi,		ur0
-	; </tODO>
-
 	clr	ur0
 	dec	ur0
 	lds	ur1,		ADCH
@@ -675,8 +670,9 @@ read_adc_adjust_brightness:
 		ldi	ZH,			high(brightness_table << 1)
 		add	ZL,			ur3
 		adc	ZH,			ur1
-		lpm	brightness_num,		Z+
-		lpm	brightness_denom,	Z
+		;lpm	brightness_num,		Z+
+		;lpm	brightness_denom,	Z
+		; TODO TODO
 
 	; Start reading next value
 	adc_noupdate:
@@ -797,8 +793,8 @@ advance_hour:
 
 ; First byte is the PORTB part of the number, second one the PORTD part
 nums:
-.db 0xfe, 0xe0, 0x78, 0x00, 0xef, 0xa0, 0xfd, 0xa0, 0x39, 0xe0		; 0...4
-.db 0xdd, 0xe0, 0xdf, 0xe0, 0xf9, 0x20, 0xff, 0xe0, 0xfd, 0xe0		; 5...9
+.db 0xfe, 0xe1, 0x78, 0x01, 0xef, 0xa1, 0xfd, 0xa1, 0x39, 0xe1		; 0...4
+.db 0xdd, 0xe1, 0xdf, 0xe1, 0xf9, 0x21, 0xff, 0xe1, 0xfd, 0xe1		; 5...9
 
 brightness_table:
 .db 0x01, 0x01, 0xfe, 0xff, 0xfd, 0xff, 0x54, 0x55, 0xfb, 0xff, 0x32, 0x33, 0x53, 0x55, 0xf8, 0xff
