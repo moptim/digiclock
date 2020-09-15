@@ -24,9 +24,7 @@
 .equ	BLINK_TOGGLE_FREQ	= 3
 .equ	BLINK_TICK_COUNT	= ((TICK_FREQ) / (BLINK_TOGGLE_FREQ))
 
-; The reading to which to clamp ADC values (avoid accepting zeroes because it
-; would disable the screen in darkness)
-.equ	MIN_ADC_READING		= 1
+.equ	BRIGHTNESS_STEP		= 4
 
 .equ	BTN_PRESCALER_MASK	= 0x0f	;  4 kHz
 .equ	ZC_PRESCALER_MASK	= 0x01	; 32 kHz
@@ -166,10 +164,18 @@ next_second_tick:	.byte 2		; u16
 btn0_presses_seen:	.byte 2		; u16
 btn1_presses_seen:	.byte 2		; u16
 brightness:		.byte 1
+brightness_setting:	.byte 1		; Only 4, 8, 12, 16, etc. Change
+					; according to brightness, but with a
+					; very heavy hysteresis.
+
+brightness_shown:	.byte 1		; What brightness value we'll show
+
 jiffies:		.byte 4		; u32 - grand total of 1kHz ticks, for
 					; clock synchronization
 brite_error_accum:	.byte 2		; u16
 adc_old_val:		.byte 1
+adc_read_ticks:		.byte 1
+brightness_num_cache:	.byte 1
 
 .equ	KRNLPAGE	= high(SRAM_START)
 
@@ -342,11 +348,12 @@ new_brightness_mask:
 	dec	brightness_ticks
 	brne	ticks_ok
 		mov	brightness_ticks,	brightness_denom
+		lds	brightness_num,		brightness_num_cache
 
 	ticks_ok:
 	clr	brightness_mask
-	cp	brightness_ticks,	brightness_num
-	brsh	rerandom
+	cp	brightness_num,		brightness_ticks
+	brlo	rerandom
 		dec	brightness_mask
 
 	rerandom:
@@ -519,12 +526,6 @@ sts	next_second_tick + 0,	ksp4
 ldi	ksp4,			high(ZC_FREQ)
 sts	next_second_tick + 1,	ksp4
 
-ldi	ksp4,			MIN_ADC_READING
-sts	adc_old_val,		ksp4
-
-ldi	ksp4,			0
-mov	blinked_num,		ksp4
-
 ; Turn on watchdog, 16ms timer
 wdr
 lds	ksp4,			WDTCSR
@@ -601,80 +602,44 @@ time_after:
 	cpc	ur3,		ur1
 	ret
 
-; If abs(error) < threshold, return 0. Otherwise return error
-; Params: ur1:     threshold
-;         ur3:ur2: error
-;
-; Returns thresholded error in ur3:ur2
-ignore_small_errors:
-	push	ur2
-
-	; Abs. This is correct, because our range is [-255, 255], and its
-	; absolute value will always fit in 8 bits.
-	sbrc	ur3,		7
-	neg	ur2
-	cp	ur2,		ur1
-	pop	ur2
-	brsh	nozero
-		clr	ur2
-		clr	ur3
-	nozero:
-	ret
-
 ; Get down-rounded log2 of gcd(brightness, 256)
-; Params: ur0: brightness value 0 to 255
+; Params: ZL:  brightness value 0 to 255
 ; Return: ur1: log2(gcd(brightness, 256))
 gcd_256:
-	push	ur0
+	push	ZL
 	clr	ur1
 
 	gcdloop:
-		lsr	ur0
+		lsr	ZL
 		brcs	gcd_256_out
 		inc	ur1
 		sbrs	ur1,		3	; Reached 8 yet?
 		rjmp	gcdloop
 gcd_256_out:
-	pop	ur0
-	ret
-
-; Get desirability of brightness value, ie. is it a multiple of 8?
-get_desirability:
-	push	ur0
-
-	ldi	ur0,		8
-	mov	ur1,		ur0
-
-	mov	ur0,		ur2
-	andi	ur0,		7
-	breq	desirable
-		clr	ur1
-	desirable:
-	pop	ur0
+	pop	ZL
 	ret
 
 ; Params: ur1: log2(gcd(n, 256))
-;         ur0: n
-; Return: brightness_num:   n / gcd
-;         brightness_denom: 256 / gcd (256 => 0)
+;         ZL:  n
+; Return: ZL:  n / gcd
+;         ur3: 256 / gcd (256 => 0)
 simplify_frac_256:
 	push	ur1
-	mov	brightness_num,		ur0
-	clr	brightness_denom
+	clr	ur3
 
 	tst	ur1,			ur1
 	breq	simplify_ready
 
 	sec
-	ror	brightness_denom
-	lsr	brightness_num
+	ror	ur3
+	lsr	ZL
 
 	simplify_loop:
 		dec	ur1
 		tst	ur1,			ur1
 		breq	simplify_ready
-		lsr	brightness_num
-		lsr	brightness_denom
+		lsr	ZL
+		lsr	ur3
 		rjmp	simplify_loop
 
 	simplify_ready:
@@ -690,20 +655,15 @@ read_adc_adjust_brightness:
 	push	ZH
 
 	lds	ur0,			ADCSRA
-	lds	ZL,			ADCH
-	cpi	ZL,			MIN_ADC_READING
-	brsh	no_adc_clamp
-		ldi	ZL,			3
-	no_adc_clamp:
-	mov	ur1,			ZL
+	lds	ur1,			ADCH
 	sbrc	ur0,			ADSC
 		lds	ur1,			adc_old_val
 	sts	adc_old_val,		ur1
 
 	; Start reading next value
-	lds	ZL,		ADCSRA
-	ori	ZL,		(1 << ADSC)
-	sts	ADCSRA,		ZL
+	lds	ZL,			ADCSRA
+	ori	ZL,			(1 << ADSC)
+	sts	ADCSRA,			ZL
 
 	; ur0 is measured value
 	ser	ur0
@@ -720,25 +680,18 @@ read_adc_adjust_brightness:
 	lds	ur2,			brightness
 	clr	ur3
 
-	; ur1 is desirability of current brightness setting
-	rcall	get_desirability
-
 	; ur3:ur2 is (current - measured) clamped
 	clr	ur3
 	sub	ur2,			ur0
 	sbc	ur3,			ur3
-	rcall	ignore_small_errors
-	mov	ur1,			ZL
 
 	lds	ZL,			brite_error_accum + 0
 	lds	ZH,			brite_error_accum + 1
 	add	ZL,			ur2
 	adc	ZH,			ur3
 
-	; Divide error accumulator by 4096, and correct reading if needed
+	; Divide error accumulator by 1024, and correct reading if needed
 	mov	ur2,			ZH
-	asr	ur2
-	asr	ur2
 	asr	ur2
 	asr	ur2
 
@@ -750,45 +703,86 @@ read_adc_adjust_brightness:
 	mov	ur3,			ur2
 	lsl	ur3
 	lsl	ur3
-	lsl	ur3
-	lsl	ur3
 	sub	ZH,			ur3
 
 	sts	brite_error_accum + 0,	ZL
 	sts	brite_error_accum + 1,	ZH
 
+	; ur0: brightness, ur3: lower hysteresis value,
+	; ZL: upper hysteresis value, ur2: brightness setting
+	ldi	ZH,			BRIGHTNESS_STEP
+	lds	ur2,			brightness_setting
+	mov	ur3,			ur2
+	mov	ZL,			ur3
+
+	sub	ur3,			ZH
+	brcc	no_underflow
+		add	ur3,			ZH
+
+	no_underflow:
+	add	ZL,			ZH
+	brcc	no_overflow
+		sub	ZL,			ZH
+
+	; Adjust down?
+	no_overflow:
+	cp	ur3,			ur0
+	brlo	no_adjust_down
+		; Don't go to zero though
+		tst	ur3
+			breq	setting_done
+		mov	ur2,			ur3
+		rjmp	setting_done
+
+	; Adjust up?
+	no_adjust_down:
+	cp	ur0,			ZL
+	brlo	setting_done
+		mov	ur2,			ZL
+
+	setting_done:
+	sts	brightness_setting,	ur2
+
+	; Slow down the transitions
+	lds	ur0,			adc_read_ticks
+	inc	ur0
+	sts	adc_read_ticks,		ur0
+	andi	ur0,			63
+	brne	noadjust
+
+	; ur0: Is 0 if we want to simplify the fraction (ie. if we're at the
+	; target brightness currently)
+	lds	ZH,			brightness_setting
+	lds	ZL,			brightness_shown
+	mov	ur0,			ZH
+	eor	ur0,			ZL
+
+	cp	ZL,			ZH
+	brsh	dont_inc_shown
+		inc	ZL
+		rjmp	change_shown
+
+	dont_inc_shown:
+	cp	ZH,			ZL
+	brsh	noadjust
+		dec	ZL
+		rjmp	change_shown
+
+	change_shown:
+	sts	brightness_shown,	ZL
+
 	; Voila
-	rcall	gcd_256
-	rcall	simplify_frac_256
-	;ldi	ur0,			3
-	;mov	brightness_num,		ur0
-	;ldi	ur0,			0
-	;mov	brightness_denom,	ur0
+	clr	ur3
+	tst	ur0
+	brne	nosimplify
+		rcall	gcd_256
+		rcall	simplify_frac_256
 
-lds	ur2,	brightness
-mov	ur0,	ur2
-andi	ur0,	3
-sts	mns_lo,	ur0
+	nosimplify:
+	sts	brightness_num_cache,	ZL
+	mov	brightness_denom,	ur3
 
-lsr	ur2
-lsr	ur2
-mov	ur0,	ur2
-andi	ur0,	3
-sts	mns_hi,	ur0
-
-lsr	ur2
-lsr	ur2
-mov	ur0,	ur2
-andi	ur0,	3
-sts	hrs_lo,	ur0
-
-lsr	ur2
-lsr	ur2
-mov	ur0,	ur2
-andi	ur0,	3
-sts	hrs_hi,	ur0
-
-
+	noadjust:
 	pop	ZH
 	pop	ZL
 	pop	ur3
