@@ -8,13 +8,14 @@
 .equ	IRQ_MAXFREQ		= 75000
 .equ	TMR_RELOAD		= (256 - ((TMR_FREQ) / (IRQ_MAXFREQ)))
 
-.equ	TICK_FREQ		= 1024
+.equ	TICK_FREQ_APPROX	= 1024
+.equ	MAX_ACTUAL_TICK_FREQ	= ((TICK_FREQ_APPROX) * 2)
 .equ	ADC_FREQ		= 1024
 .equ	ZC_FREQ			= 100
 
 ; This works differently from the C source, synchronize ADC to zero crossings
 ; so we only need to keep a 8-bit tick counter
-.equ	ADC_INTERVAL		= ((TICK_FREQ) / (ADC_FREQ))
+.equ	ADC_INTERVAL		= ((TICK_FREQ_APPROX) / (ADC_FREQ))
 
 ; Has to be 2^n - 1 because it's a bitmask. A random number at most this large
 ; is added to TMR_RELOAD at the start of each IRQ, to spread out the IRQ
@@ -22,7 +23,7 @@
 .equ	TMR_RELOAD_RANGE	= 31
 
 .equ	BLINK_TOGGLE_FREQ	= 3
-.equ	BLINK_TICK_COUNT	= ((TICK_FREQ) / (BLINK_TOGGLE_FREQ))
+.equ	BLINK_TICK_COUNT	= ((TICK_FREQ_APPROX) / (BLINK_TOGGLE_FREQ))
 
 .equ	BRIGHTNESS_STEP		= 4
 
@@ -93,9 +94,10 @@
 ;         @0      memory address of target timestamp variable
 ;         @1      escape label
 ;         @2      function to call if timer hass advanced past *(@0)
-;         @3      event interval in timer ticks
+;         @3      event interval in timer ticks, low
+;         @4      event interval in timer ticks, high
 ;
-; Thrashes ZL, ur2 and ur3!
+; Thrashes ur2 and ur3!
 .macro	user_check_time_after
 lds	ur3,		@0 + 1
 lds	ur2,		@0 + 0
@@ -104,10 +106,8 @@ rcall	time_after
 brpl	@1
 
 	rcall	@2
-	ldi	ZL,		low (@3)
-	add	ur2,		ZL
-	ldi	ZL,		high(@3)
-	adc	ur3,		ZL
+	add	ur2,		@3
+	adc	ur3,		@4
 	sts	@0 + 1,		ur3
 	sts	@0 + 0,		ur2
 .endmacro
@@ -128,7 +128,7 @@ brpl	@1
 ; Returns: ksp1:   next confidence value
 
 ; Thrashes:ksp5, ksp2, r0, r1
-.macro	exponential_filter_isr	; 11 cycles
+.macro	exponential_filter_isr	; 13 cycles
 	ser	ksp5
 	sub	ksp5,		ksp2	; inv_alpha
 	inc	ksp2			; alpha_p1
@@ -138,6 +138,8 @@ brpl	@1
 	mul	ksp4,		ksp2
 	add	ksp0,		r0
 	adc	ksp1,		r1
+	sbrc	ksp0,		7	; Round, don't floor
+		inc	ksp1
 .endmacro
 
 .DSEG
@@ -163,6 +165,7 @@ next_jiffies_tick:	.byte 2		; u16
 next_second_tick:	.byte 2		; u16
 btn0_presses_seen:	.byte 2		; u16
 btn1_presses_seen:	.byte 2		; u16
+zero_crossings_seen:	.byte 2		; u16
 brightness:		.byte 1
 brightness_setting:	.byte 1		; Only 4, 8, 12, 16, etc. Change
 					; according to brightness, but with a
@@ -170,8 +173,11 @@ brightness_setting:	.byte 1		; Only 4, 8, 12, 16, etc. Change
 
 brightness_shown:	.byte 1		; What brightness value we'll show
 
-jiffies:		.byte 4		; u32 - grand total of 1kHz ticks, for
+jiffies:		.byte 2		; u16 - grand total of 1kHz ticks, for
 					; clock synchronization
+last_1sec_jiffies:	.byte 2		; u16 - what it was at last 1sec mark
+measured_local_f:	.byte 2		; u16 - local "1kHz" freq in Hz 
+
 brite_error_accum:	.byte 2		; u16
 adc_old_val:		.byte 1
 adc_read_ticks:		.byte 1
@@ -515,16 +521,23 @@ sts	TCNT2,		ksp4
 ; Assumes that ADC_INTERVAL and ZC_FREQ fit in 8 bits and SRAM is already
 ; cleared
 init_locals:
+ldi	ksp4,			low (TICK_FREQ_APPROX)
+sts	measured_local_f + 0,	ksp4
+sts	next_second_tick + 0,	ksp4
+ldi	ksp4,			high(TICK_FREQ_APPROX)
+sts	measured_local_f + 1,	ksp4
+sts	next_second_tick + 1,	ksp4
 
 ldi	ksp4,			low (ADC_INTERVAL)
 sts	next_adc_read + 0,	ksp4
 ldi	ksp4,			high(ADC_INTERVAL)
 sts	next_adc_read + 1,	ksp4
 
+; Wait for the first second before actually calibrating
 ldi	ksp4,			low (ZC_FREQ)
-sts	next_second_tick + 0,	ksp4
+sts	zero_crossings_seen + 0,ksp4
 ldi	ksp4,			high(ZC_FREQ)
-sts	next_second_tick + 1,	ksp4
+sts	zero_crossings_seen + 1,ksp4
 
 ; Turn on watchdog, 16ms timer
 wdr
@@ -573,23 +586,40 @@ mainloop:
 ;         @2      function to call if timer hass advanced past *(@0)
 ;         @3      event interval in timer ticks
 	ml_check_blink_time:
-	user_check_time_after	next_blink_tick,	ml_check_jiffies_time, toggle_blink, BLINK_TICK_COUNT
+	ldi	ZL,		low (BLINK_TICK_COUNT)
+	ldi	ZH,		high(BLINK_TICK_COUNT)
+	user_check_time_after	next_blink_tick,	ml_check_jiffies_time, toggle_blink, ZL, ZH
 
 	ml_check_jiffies_time:
-	user_check_time_after	next_jiffies_tick,	ml_check_next_second_time, advance_jiffies, 1
+	ldi	ZL,		1
+	clr	ZH
+	user_check_time_after	next_jiffies_tick,	ml_check_next_second_time, advance_jiffies, ZL, ZH
 
 	ml_check_next_second_time:
-	user_check_time_after	next_second_tick,	ml_check_btn0_presses,	advance_second, TICK_FREQ
+	lds	ZL,		measured_local_f + 0
+	lds	ZH,		measured_local_f + 1
+	user_check_time_after	next_second_tick,	ml_check_btn0_presses,	advance_second, ZL, ZH
 
 	ml_check_btn0_presses:
+	ldi	ZL,		1
+	clr	ZH
 	lds	ur1,		btn0_presses + 1
 	lds	ur0,		btn0_presses + 0
-	user_check_time_after	btn0_presses_seen,	ml_check_btn1_presses,	advance_blink, 1
+	user_check_time_after	btn0_presses_seen,	ml_check_btn1_presses,	advance_blink, ZL, ZH
 
 	ml_check_btn1_presses:
+	; ldi	ZL,		1
+	; clr	ZH
 	lds	ur1,		btn1_presses + 1
 	lds	ur0,		btn1_presses + 0
-	user_check_time_after	btn1_presses_seen,	ml_continue,		advance_blinked_num, 1
+	user_check_time_after	btn1_presses_seen,	ml_get_zcs,		advance_blinked_num, ZL, ZH
+
+	ml_get_zcs:
+	ldi	ZL,		100
+	;clr	ZH
+	lds	ur1,		zero_crossings + 1
+	lds	ur0,		zero_crossings + 0
+	user_check_time_after	zero_crossings_seen,	ml_continue,		advance_accurate_second, ZL, ZH
 
 	ml_continue:
 	rjmp	mainloop
@@ -657,15 +687,20 @@ read_adc_adjust_brightness:
 	lds	ur0,			ADCSRA
 	lds	ur1,			ADCH
 	sbrc	ur0,			ADSC
-		lds	ur1,			adc_old_val
-	sts	adc_old_val,		ur1
+		rjmp	adc_use_old_val
 
 	; Start reading next value
+	sts	adc_old_val,		ur1
 	lds	ZL,			ADCSRA
 	ori	ZL,			(1 << ADSC)
 	sts	ADCSRA,			ZL
+	rjmp	adc_continue
+
+	adc_use_old_val:
+		lds	ur1,			adc_old_val
 
 	; ur0 is measured value
+	adc_continue:
 	ser	ur0
 	sub	ur0,			ur1
 	cpi	ur0,			0x40	; Prevent overflow
@@ -792,32 +827,16 @@ read_adc_adjust_brightness:
 	ret
 
 advance_jiffies:
-	push	ZL
-	push	ZH
 	push	ur0
-	push	ur1
-
-	ldi	ZH,		high(jiffies)
-	ldi	ZL,		low (jiffies)
-
-	clr	ur1
-	ld	ur0,		Z
+	lds	ur0,		jiffies + 0
 	inc	ur0
-	st	Z+,		ur0
-	ld	ur0,		Z
-	adc	ur0,		ur1
-	st	Z+,		ur0
-	ld	ur0,		Z
-	adc	ur0,		ur1
-	st	Z+,		ur0
-	ld	ur0,		Z
-	adc	ur0,		ur1
-	st	Z+,		ur0
-
-	pop	ur1
+	sts	jiffies + 0,	ur0
+	brcc	aj_no_ovf
+		lds	ur0,		jiffies + 1
+		inc	ur0
+		sts	jiffies + 1,	ur1
+	aj_no_ovf:
 	pop	ur0
-	pop	ZH
-	pop	ZL
 	ret
 
 toggle_blink:
@@ -943,6 +962,49 @@ advance_hour:
 	sts	hrs_hi,	ZH
 	pop	ZH
 	pop	ZL
+	ret
+
+; The accurate clock has advanced one second. Jiffies should be up by
+; measured_local_f
+advance_accurate_second:
+	push	ur0
+	push	ur1
+	push	ur2
+	push	ur3
+
+	lds	ur3,			jiffies + 1
+	lds	ur2,			jiffies + 0
+	lds	ur1,			last_1sec_jiffies + 1
+	lds	ur0,			last_1sec_jiffies + 0
+
+	sts	last_1sec_jiffies + 1,	ur3
+	sts	last_1sec_jiffies + 0,	ur2
+
+	; ur3:ur2 is the number of jiffies elapsed during previous second
+	sub	ur2,			ur0
+	sbc	ur3,			ur1
+
+	; If we're back here after losing the clock signal, the difference
+	; could be just anything. Assume we are actually increasing jiffies
+	; at a frequency less than twice the intended one, and clamp
+	; local timer adjustment accordingly.
+	ldi	ur0,			high(MAX_ACTUAL_TICK_FREQ)
+	cp	ur3,			ur0
+	brlo	no_clamp_local_f
+		mov	ur3,			ur0
+		ldi	ur0,			low (MAX_ACTUAL_TICK_FREQ)
+		cp	ur2,			ur0
+		brlo	no_clamp_local_f
+			mov	ur2,			ur0
+
+	no_clamp_local_f:
+	sts	measured_local_f + 1,	ur3
+	sts	measured_local_f + 0,	ur2
+
+	pop	ur3
+	pop	ur2
+	pop	ur1
+	pop	ur0
 	ret
 
 ; First byte is the PORTB part of the number, second one the PORTD part
