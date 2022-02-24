@@ -1,0 +1,1 @@
+A digital clock for [an ATmega328PB-based circuit board](https://github.com/moptim/clock-circuit). Plain assembler, just assemble with avra and upload to the board. The C code is not working, it was used to sketch the structure of the code until it was realized that hand-tuning register usage between interrupts and mainloop would give the best performance, ergo least flicker.
